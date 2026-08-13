@@ -27,6 +27,15 @@ LibreOffice does not parse Outlook `.msg`. Docling's email backend
 (`oxmsg` → RFC 822 → `mailparser`) is the feature to match, over gRPC
 and without a Python serving path.
 
+## Live results (vs Docling)
+
+Docling convert is a batch: the client waits until the whole message
+(and every attachment the pipeline will touch) is done, then gets one
+document. We emit as parts land so a UI can paint live — subject and
+addresses first, then the plain body, then HTML, then each attachment
+name as it is listed. The coordinator forwards those events; it does
+not buffer the collector until MIME is exhausted.
+
 ## What this process owns
 
 - Detecting `.eml` (RFC 822) vs `.msg` (OLE2/CFB + MAPI) from **bytes**,

@@ -8,7 +8,10 @@
   already emits, with a `CollectorSource` of `email`.
 - Stream native events as they are known (headers first, then body
   parts, then attachments) so a large mailbox message does not wait for
-  the last MIME part before the client sees the subject.
+  the last MIME part before the client sees the subject. This is a
+  product difference from Docling, not a transport optimization: the
+  stream is what UIs consume. A unary “whole Document” may exist as a
+  convenience; it is not the live path.
 - Diskless: uploaded bytes stay in memory; the container is read-only.
 
 ## 2. Non-goals (v1)
