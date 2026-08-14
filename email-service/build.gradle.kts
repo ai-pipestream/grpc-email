@@ -13,6 +13,7 @@ dependencies {
 
     testImplementation(libs.grpc.inprocess)
     testImplementation(libs.junit.jupiter)
+    testImplementation(libs.assertj.core)
     testRuntimeOnly(libs.junit.launcher)
 }
 

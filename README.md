@@ -38,7 +38,8 @@ rpc GetServiceInfo(GetServiceInfoRequest) returns (GetServiceInfoResponse);
 messages in file order with `complete=true` on the last, then half-close.
 Options: `document_id`, advisory `filename` / `content_type` (recorded, never
 trusted), `list_attachments`, `include_attachment_bytes`, `max_document_mib`
-(a client may lower the server's ceiling, never raise it).
+(a client may lower the server's ceiling, never raise it), `emit_document`
+(opt into the Document projection below).
 
 **Response.** A `ParseEmailResponse` per event, `oneof event`:
 
@@ -47,6 +48,7 @@ trusted), `list_attachments`, `include_attachment_bytes`, `max_document_mib`
 | `EmailInfo` | first, from headers alone | format, subject, role-tagged addresses, dates, message-id, in-reply-to, references, root content type, the full header list |
 | `BodyPart` | per text part, in MIME order | `part_id`, `PLAIN`/`HTML` + `content_type_raw`, UTF-8 text, declared charset, MAPI source property for `.msg` |
 | `Attachment` | per attachment, when `list_attachments` or `include_attachment_bytes` | index, filename, content type, size, content id, inline flag, optional bytes |
+| `Document` | once, immediately before the trailer, only when `emit_document` | the whole message as one `ai.pipestream.document.v1.Document` |
 | `ParseStatus` | last, exactly once | `STATE_OK` / `STATE_PARTIAL`, warnings, counts, message size |
 
 Format is detected from the bytes (OLE2 signature, or an RFC 822 header block
@@ -77,6 +79,37 @@ that puts an attachment part *before* its text part gets those two events in
 that order; the collector streams what it reads rather than holding parts
 back to impose a grouping. `part_id` is the dotted MIME path, so clients that
 care can re-sort.
+
+## Document projection
+
+`emit_document` turns on a second, lossy view of the same parse: the server
+folds its own outgoing events into one `ai.pipestream.document.v1.Document`
+and sends it as the `document` event, immediately before the trailer. The
+typed events stay exactly as they were — a client can diff the two streams —
+and with the option off the fold never runs.
+
+The fold lives in [`EmailDocumentFold`](email-service/src/main/java/ai/pipestream/email/document/EmailDocumentFold.java),
+is fed the very messages the server writes, and is single-pass. What it maps
+is [`docs/design.md` §4](docs/design.md); the short version:
+
+- subject → `Document.name` and a `TitleItem`, the first body child;
+- envelope facts (addresses by role, dates, threading ids, root content type)
+  → typed `email.*` key/values in the body group's `meta.custom_fields`, not
+  a paragraph of prose and not the raw header list;
+- each `text/plain` part → one `TextItem` per blank-line-separated paragraph,
+  tagged with its `email.part_id`;
+- listed attachments → a `GROUP_LABEL_LIST` group named `attachments`, one
+  line per attachment;
+- inline images (`inline`, `image/*`, with a content id) → a `PictureItem`
+  whose `ImageRef.uri` is **`part:<part_id>`** — a pointer into the typed
+  stream you are already reading (`part:1.3` for a MIME path, `part:attach:1`
+  for a MAPI storage). Bytes are never embedded: a Document is one gRPC
+  message, and attachment payloads belong on `Attachment.data`.
+
+Not mapped, deliberately: HTML bodies (the HTML collector parses those, and
+its items merge into this fragment downstream), the lossless header list, and
+provenance — email has no pages, so `prov` stays empty rather than carrying
+an invented page number.
 
 ## Formats
 
@@ -142,7 +175,7 @@ nothing else.
 
 ## Tests
 
-`./gradlew test` — 43 tests, no network, no committed binaries. Fixtures are
+`./gradlew test` — 70 tests, no network, no committed binaries. Fixtures are
 authored in memory: Jakarta Mail writes the `.eml`, and `MsgFixtures` builds
 `.msg` bytes from the MS-OXMSG layout up (compound-file streams, property
 chunks, recipient and attachment storages, an uncompressed
@@ -152,6 +185,12 @@ The liveness assertions are load-bearing: one test half-uploads a message and
 requires the envelope to arrive before the rest is sent, another requires
 every body part and attachment to be its own message ahead of the trailer.
 Rework the server into a batch and they fail.
+
+The Document fold is tested twice over: as a unit, on synthesized event
+streams, with a structural integrity check (unique self refs, symmetric
+parent/child links, no dangling refs) asserted on every document it builds;
+and on the wire, where the document must arrive exactly once, immediately
+before the trailer, saying the same things the typed events said.
 
 ## Remotes
 

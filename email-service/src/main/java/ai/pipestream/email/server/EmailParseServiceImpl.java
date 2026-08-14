@@ -1,5 +1,6 @@
 package ai.pipestream.email.server;
 
+import ai.pipestream.email.document.EmailDocumentFold;
 import ai.pipestream.email.parse.EmailSniffer;
 import ai.pipestream.email.parse.EmlParser;
 import ai.pipestream.email.parse.HeaderProjection;
@@ -143,20 +144,38 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
    * client's attachment-listing choice, and keeps the counts the trailer
    * reports. Emission is synchronized because the envelope can be written
    * from the request thread while the body arrives from a parse thread.
+   *
+   * <p>When the client asked for one, every event also passes through the
+   * Document fold on its way out, so the projection is built from exactly
+   * what the wire carried rather than from a second traversal of the message.
+   * Without that option the fold is null and costs nothing.
    */
   private final class Sink implements ParseSink {
 
     private final StreamObserver<ParseEmailResponse> responses;
     private final ParseOptions options;
+    private final EmailDocumentFold fold;
     private final List<String> warnings = new ArrayList<>();
     private boolean infoSent;
     private int bodyParts;
     private int attachments;
     private long attachmentBytes;
 
-    private Sink(StreamObserver<ParseEmailResponse> responses, ParseOptions options) {
+    private Sink(
+        StreamObserver<ParseEmailResponse> responses,
+        ParseOptions options,
+        boolean emitDocument) {
       this.responses = responses;
       this.options = options;
+      this.fold = emitDocument ? new EmailDocumentFold(SERVICE_VERSION) : null;
+    }
+
+    /** The one way out. Everything the client sees, the fold sees first. */
+    private void emit(ParseEmailResponse event) {
+      if (fold != null) {
+        fold.consume(event);
+      }
+      responses.onNext(event);
     }
 
     @Override
@@ -165,13 +184,13 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
         return;
       }
       infoSent = true;
-      responses.onNext(ParseEmailResponse.newBuilder().setEmailInfo(info).build());
+      emit(ParseEmailResponse.newBuilder().setEmailInfo(info).build());
     }
 
     @Override
     public synchronized void bodyPart(BodyPart part) {
       bodyParts++;
-      responses.onNext(ParseEmailResponse.newBuilder().setBodyPart(part).build());
+      emit(ParseEmailResponse.newBuilder().setBodyPart(part).build());
     }
 
     @Override
@@ -179,7 +198,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
       attachments++;
       attachmentBytes += attachment.getSizeBytes();
       if (options.emitAttachments()) {
-        responses.onNext(ParseEmailResponse.newBuilder().setAttachment(attachment).build());
+        emit(ParseEmailResponse.newBuilder().setAttachment(attachment).build());
       }
     }
 
@@ -192,6 +211,12 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
       return infoSent;
     }
 
+    /**
+     * Closes the stream: the trailer is built first, folded so the projection
+     * has seen the whole stream, then the document goes out ahead of it. The
+     * status stays last, because its arrival is what makes the parse a
+     * success and nothing may follow it.
+     */
     private synchronized void trailer(long messageBytes) {
       ParseStatus.Builder status = ParseStatus.newBuilder()
           .setState(warnings.isEmpty() ? ParseStatus.State.STATE_OK
@@ -201,7 +226,12 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
           .setAttachments(attachments)
           .setAttachmentBytes(attachmentBytes)
           .setMessageBytes(messageBytes);
-      responses.onNext(ParseEmailResponse.newBuilder().setStatus(status).build());
+      ParseEmailResponse trailer = ParseEmailResponse.newBuilder().setStatus(status).build();
+      if (fold != null) {
+        fold.consume(trailer);
+        responses.onNext(ParseEmailResponse.newBuilder().setDocument(fold.take()).build());
+      }
+      responses.onNext(trailer);
       bodyPartsEmitted.addAndGet(bodyParts);
       attachmentsSeen.addAndGet(attachments);
     }
@@ -272,7 +302,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
           wire.getListAttachments(),
           wire.getIncludeAttachmentBytes(),
           maxAttachmentBytes);
-      sink = new Sink(responses, options);
+      sink = new Sink(responses, options, wire.getEmitDocument());
     }
 
     private void onChunk(byte[] data, boolean complete) {

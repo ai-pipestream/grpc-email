@@ -5,6 +5,7 @@ syntax = "proto3";
 
 package ai.pipestream.email.v1;
 
+import "ai/pipestream/document/v1/document.proto";
 import "google/protobuf/timestamp.proto";
 
 option java_multiple_files = true;
@@ -86,6 +87,15 @@ message ParseEmailOptions {
   // server's configured cap; a client can lower the ceiling but never raise
   // it. Input above the effective cap fails with RESOURCE_EXHAUSTED.
   uint32 max_document_mib = 6;
+
+  // When true, the server folds its own typed event stream into one
+  // ai.pipestream.document.v1.Document and emits it as the document event,
+  // immediately before the ParseStatus trailer. The typed events remain the
+  // lossless wire; the Document is the lossy structural projection every
+  // collector in the fleet shares, so a client that already consumes the
+  // Document plane does not have to reimplement the mapping. When false the
+  // fold never runs and nothing about the stream changes.
+  bool emit_document = 7;
 }
 
 // One slice of the message upload, in file order.
@@ -113,6 +123,12 @@ message ParseEmailResponse {
     Attachment attachment = 3;
     // Trailer: counts and warnings for the finished parse.
     ParseStatus status = 4;
+    // The whole message as one Document, emitted once, immediately before
+    // status, only when emit_document was set. It is a projection of the
+    // events above and never carries anything they did not: attachment
+    // payloads stay on the typed stream, and an inline image is referenced
+    // by a "part:<part_id>" URI rather than embedded.
+    ai.pipestream.document.v1.Document document = 5;
   }
 }
 
