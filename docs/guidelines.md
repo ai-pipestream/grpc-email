@@ -1,8 +1,8 @@
-# grpc-email — guidelines
+# grpc-email: guidelines
 
 **This repo:** gRPC collector for RFC 822 .eml and Outlook .msg, projecting into the gRParse Document data plane
 
-**Language:** Java (Quarkus or plain grpc-java + virtual threads, matching grPOIc)
+**Language:** Java, plain grpc-java on virtual threads (matching grPOIc)
 
 **Copy from:** `/work/main/grpc-services/grPOIc`
 
@@ -36,7 +36,7 @@ Sibling implementations to copy from (same workspace):
 
 ## Live stream is the product
 
-Docling convert is batch: one document when everything is finished.
+A batch converter returns one document when everything is finished.
 **We emit the first usable unit the moment it exists** so a UI can paint
 it. `Complete` / `ParseStatus` is a trailer (counts, failures), not the
 payload.
@@ -51,23 +51,23 @@ payload.
 
 ## Wire
 
-- Binary gRPC. No JSON transcoding on the parse path.
-- **No JSON bridge** for typed data: no `json_format.MessageToDict` /
-  `ParseDict`, no `model_dump_json` round-trips, no stringified JSON
-  blobs as the schema. Preserve types. Use enums + `*_raw` for open
-  vocabularies. `google.protobuf.Value` / `Struct` only where the
-  upstream really is `dict[str, Any]`.
-- Native event stream first (like libreoffice / calamine / POI). Mapping
-  into `ai.pipestream.document.v1.Document` can live here *or* in gRParse;
-  do not invent a parallel JSON document.
-- If you emit Document items, tag `CollectorSource` (`collector`, `model`,
-  optional `confidence`). Sources never overwrite each other.
-- buf v2: lint `STANDARD` + `COMMENTS`, breaking `FILE`. Every field,
-  enum value, and RPC has a comment. `disallow_comment_ignores` when the
-  sibling does.
-- Package: `ai.pipestream.<service>.v1`.
-- Register **gRPC health** (`grpc.health.v1.Health`) and **server
-  reflection**.
+Binary gRPC, with no JSON transcoding on the parse path. There is no JSON
+bridge for typed data: no `json_format.MessageToDict` / `ParseDict`, no
+`model_dump_json` round-trips, no stringified JSON blobs standing in for
+the schema. Preserve types; use enums plus a `*_raw` companion for open
+vocabularies, and `google.protobuf.Value` / `Struct` only where the
+upstream really is `dict[str, Any]`.
+
+The native event stream comes first (like libreoffice / calamine / POI).
+Mapping into `ai.pipestream.document.v1.Document` can live here *or* in
+gRParse; do not invent a parallel JSON document. If you emit Document
+items, tag `CollectorSource` (`collector`, `model`, optional
+`confidence`); sources never overwrite each other.
+
+buf v2: lint `STANDARD` + `COMMENTS`, breaking `FILE`. Every field, enum
+value, and RPC has a comment, with `disallow_comment_ignores` when the
+sibling does. The package is `ai.pipestream.<service>.v1`. Register gRPC
+health (`grpc.health.v1.Health`) and server reflection.
 
 ## Process
 
@@ -112,4 +112,4 @@ payload.
   *server this client calls*).
 - Downloading Hugging Face weights at RPC time.
 - Changing gRParse in the same PR unless you are wiring the collector
-  endpoint — prefer a complete service here first.
+  endpoint; prefer a complete service here first.

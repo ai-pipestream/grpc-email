@@ -1,7 +1,7 @@
 # grpc-email architecture
 
-**Status:** spec (no implementation yet)
-**Updated:** 2026-08-13
+**Status:** implemented
+**Updated:** 2026-08-15
 
 Implementers start at [`AGENTS.md`](../AGENTS.md), then this file, `design.md`, and `guidelines.md`.
 
@@ -25,18 +25,38 @@ export sink.
    Document stream  ──►  grpc-enrich (optional)  ──►  protomolt sink
 ```
 
-LibreOffice does not parse Outlook `.msg`. Docling's email backend
-(`oxmsg` → RFC 822 → `mailparser`) is the feature to match, over gRPC
-and without a Python serving path.
+LibreOffice does not parse Outlook `.msg`, so this service owns the format
+directly, over gRPC and without a Python serving path.
 
-## Live results (vs Docling)
+## Live results
 
-Docling convert is a batch: the client waits until the whole message
-(and every attachment the pipeline will touch) is done, then gets one
-document. We emit as parts land so a UI can paint live — subject and
-addresses first, then the plain body, then HTML, then each attachment
-name as it is listed. The coordinator forwards those events; it does
-not buffer the collector until MIME is exhausted.
+A batch converter hands back one document when the whole message (and every
+attachment the pipeline will touch) is done. This service emits as parts
+land so a UI can paint live: subject and addresses first, then the plain
+body, then HTML, then each attachment name as it is listed. The coordinator
+forwards those events; it does not buffer the collector until MIME is
+exhausted.
+
+## Request flow inside the process
+
+```mermaid
+flowchart LR
+    client[Client stream] --> impl[EmailParseServiceImpl]
+    impl --> sniff[EmailSniffer<br/>OLE2 magic or RFC 822 header block]
+    sniff -->|EML| eml[EmlParser<br/>Jakarta Mail]
+    sniff -->|MSG| msg[MsgParser<br/>POI MAPIMessage]
+    eml --> sink[ParseSink<br/>typed events]
+    msg --> sink
+    sink --> fold{emit_document?}
+    fold -->|yes| doc[EmailDocumentFold]
+    fold -->|no| out[Response stream]
+    doc --> out
+    out --> client
+```
+
+One parse runs on one virtual thread; a semaphore bounds parses in flight
+to protect heap. Format detection reads bytes only, never the advisory
+content type.
 
 ## What this process owns
 
@@ -73,17 +93,14 @@ not buffer the collector until MIME is exhausted.
 - Virtual threads, one parse per request, a semaphore on heap (MIME
   trees are memory-heavy), same concurrency story as `grPOIc`.
 
-Python `oxmsg` / `mailparser` are the Docling reference, not the
-runtime.
-
 ## Failure model
 
 gRPC status, never a 200 with a partial lie:
 
-- `INVALID_ARGUMENT` — no bytes, truncated MIME, missing complete flag
-- `UNIMPLEMENTED` — not email
-- `RESOURCE_EXHAUSTED` — over the byte cap
-- `INTERNAL` — parser fault
+- `INVALID_ARGUMENT`: no bytes, truncated MIME, missing complete flag
+- `UNIMPLEMENTED`: not email
+- `RESOURCE_EXHAUSTED`: over the byte cap
+- `INTERNAL`: parser fault
 
 A failed collector is a `CollectorFailure` on the gRParse stream. It
 does not fail the parse while another collector succeeds.
