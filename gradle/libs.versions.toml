@@ -1,15 +1,15 @@
 [versions]
-grpc = "1.69.0"
+grpc = "1.83.1"
 protobuf = "4.29.3"
 # Jakarta Mail 2.1 reference implementation; brings jakarta.mail-api and
 # angus-activation transitively.
 angusMail = "2.0.5"
 # poi-scratchpad carries HSMF (MAPIMessage), the .msg reader.
-poi = "5.4.1"
-log4j = "2.24.3"
-junit = "5.11.4"
+poi = "5.5.1"
+log4j = "2.26.1"
+junit = "5.14.4"
 assertj = "3.27.7"
-protobufPlugin = "0.9.5"
+protobufPlugin = "0.10.0"
 
 [libraries]
 grpc-netty-shaded = { module = "io.grpc:grpc-netty-shaded", version.ref = "grpc" }
