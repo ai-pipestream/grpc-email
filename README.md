@@ -72,7 +72,8 @@ consulted. HTML bodies are emitted verbatim for the HTML collector; they are
 not parsed here. Attachment payloads stay off the wire unless asked for.
 
 `GetServiceInfo` reports versions, supported formats, and the limits above,
-for orchestrators and tool facades.
+for orchestrators and tool facades. Its `ui` field is the shared `UiInfo`
+advertisement the demo shell reads to build its tab bar.
 
 **Errors** are gRPC status codes, never a partial success dressed up as one:
 

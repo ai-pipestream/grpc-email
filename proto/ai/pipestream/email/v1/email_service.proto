@@ -327,4 +327,17 @@ message GetServiceInfoResponse {
   uint64 max_attachment_bytes = 7;
   // Messages parsed concurrently before further parses queue.
   uint32 max_concurrent_parses = 8;
+  // Frontend advertisement. The demo shell reads it to build its tab bar.
+  UiInfo ui = 9;
+}
+
+// Frontend advertisement. Same shape in every ai-pipestream grpc service:
+// the demo shell reads it to build its tab bar.
+message UiInfo {
+  // Tab title, for example "Email".
+  string title = 1;
+  // Shell mount path, for example "/ui/email".
+  string path = 2;
+  // One line, used as the tab tooltip.
+  string description = 3;
 }

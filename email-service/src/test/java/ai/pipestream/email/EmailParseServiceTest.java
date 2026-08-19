@@ -589,6 +589,10 @@ class EmailParseServiceTest {
     assertEquals(MESSAGE_CAP, info.getMaxDocumentBytes());
     assertEquals(ATTACHMENT_CAP, info.getMaxAttachmentBytes());
     assertEquals(4, info.getMaxConcurrentParses());
+    assertEquals("Email", info.getUi().getTitle());
+    assertEquals("/ui/email", info.getUi().getPath());
+    assertEquals("Email bytes to typed events: envelope, body, attachments",
+        info.getUi().getDescription());
   }
 
   @Test

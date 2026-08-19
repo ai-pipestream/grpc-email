@@ -20,6 +20,7 @@ import ai.pipestream.email.v1.ParseEmailOptions;
 import ai.pipestream.email.v1.ParseEmailRequest;
 import ai.pipestream.email.v1.ParseEmailResponse;
 import ai.pipestream.email.v1.ParseStatus;
+import ai.pipestream.email.v1.UiInfo;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import java.io.ByteArrayOutputStream;
@@ -106,6 +107,13 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
             .setMaxDocumentBytes(maxDocumentBytes)
             .setMaxAttachmentBytes(maxAttachmentBytes)
             .setMaxConcurrentParses(maxConcurrentParses)
+            .setUi(
+                UiInfo.newBuilder()
+                    .setTitle("Email")
+                    .setPath("/ui/email")
+                    .setDescription(
+                        "Email bytes to typed events: envelope, body, attachments")
+                    .build())
             .build());
     responses.onCompleted();
   }
