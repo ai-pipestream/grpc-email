@@ -179,6 +179,24 @@ The image build runs the test suite, so an image never ships from a tree
 whose tests did not pass. `--read-only` works because the server never
 writes.
 
+## Web demo
+
+[`demos/node-client`](demos/node-client) is a dependency-light Node bridge
+(`@grpc/grpc-js` + `@grpc/proto-loader` only) plus a browser page that makes
+the live stream visible: the browser POSTs an `.eml` and reads Server-Sent
+Events off the same response, so the envelope appears while the upload bar is
+still filling. [`demos/sample-data`](demos/sample-data) ships two tiny
+hand-authored `.eml` fixtures.
+
+```bash
+cd demos/node-client
+npm install
+npm start                  # http://127.0.0.1:8090, bridge to 127.0.0.1:50054
+```
+
+`GRPC_EMAIL_ADDR` points the bridge elsewhere, `PORT` moves the page, and
+`UI_BASE=/ui/email` serves it under the prefix the demo shell proxies to.
+
 ## Concurrency model
 
 One parse per request on a virtual thread, with a semaphore bounding how many

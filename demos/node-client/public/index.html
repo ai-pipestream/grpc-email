@@ -1,0 +1,463 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>grpc-email: watch an email stream</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbfd;      --panel: #fff;    --ink: #16181d;   --dim: #6a7080;
+    --line: #e2e5ec;    --accent: #2f6df6; --live: #12a150; --warn: #d1442f;
+    --attach: #8b5cf6;  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1014;    --panel: #171a21; --ink: #e6e8ee;   --dim: #949bab;
+      --line: #262b36;  --accent: #6b9bff; --live: #37d67a; --warn: #ff7a63;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header { padding: 24px 24px 8px; }
+  h1 { margin: 0; font-size: 20px; letter-spacing: -.01em; }
+  h1 code { font: 600 19px/1 var(--mono); color: var(--accent); }
+  .sub { margin: 6px 0 0; color: var(--dim); max-width: 62ch; }
+  main { padding: 16px 24px 40px; display: grid; gap: 16px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 14px 16px;
+  }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+  label { display: block; font-size: 12px; color: var(--dim); margin-bottom: 4px; }
+  select {
+    font: 13px var(--mono); padding: 7px 9px; border-radius: 7px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+  }
+  button {
+    font: 600 13px system-ui; padding: 8px 16px; border-radius: 7px; border: 0;
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button:disabled { opacity: .45; cursor: default; }
+  .throttle { display: flex; align-items: center; gap: 8px; }
+  .throttle input { width: 130px; }
+  .checks { display: flex; gap: 14px; font-size: 13px; color: var(--ink); }
+  .checks label { display: flex; align-items: center; gap: 5px; margin: 0; color: var(--ink); }
+  .hint { font-size: 12px; color: var(--dim); }
+
+  /* Upload bar with a marker where the envelope landed. */
+  .track {
+    position: relative; height: 26px; border-radius: 6px;
+    background: var(--bg); border: 1px solid var(--line); overflow: hidden;
+  }
+  .fill { height: 100%; width: 0; background: var(--accent); opacity: .22; transition: width .08s linear; }
+  .mark { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--live); display: none; }
+  .track-label {
+    position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: space-between; padding: 0 10px;
+    font: 11px var(--mono); color: var(--dim);
+  }
+  .verdict { margin: 10px 0 0; font-size: 14px; }
+  .verdict strong { color: var(--live); }
+  .verdict.idle { color: var(--dim); }
+
+  .stats { display: flex; flex-wrap: wrap; gap: 22px; }
+  .stat b { display: block; font: 600 20px/1.2 var(--mono); }
+  .stat span { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; }
+
+  .split { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; }
+  @media (max-width: 820px) { .split { grid-template-columns: 1fr; } }
+
+  #feed { height: 46vh; min-height: 260px; overflow-y: auto; font: 12.5px/1.65 var(--mono); }
+  .ev { padding: 1px 0; border-bottom: 1px solid transparent; white-space: pre-wrap; word-break: break-all; }
+  .ev.new { animation: flash .5s ease-out; }
+  @keyframes flash { from { background: color-mix(in srgb, var(--live) 26%, transparent); } }
+  .k { color: var(--dim); }
+  .subj { color: var(--accent); font-weight: 600; }
+  .body { color: var(--live); }
+  .att { color: var(--attach); font-weight: 600; }
+  .err { color: var(--warn); font-weight: 600; }
+
+  #envelope { font: 12.5px var(--mono); }
+  #envelope dt { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; margin-top: 8px; }
+  #envelope dt:first-child { margin-top: 0; }
+  #envelope dd { margin: 0; word-break: break-all; }
+  #envelope .empty { color: var(--dim); font-style: italic; }
+  footer { padding: 0 24px 32px; color: var(--dim); font-size: 12.5px; max-width: 74ch; }
+  footer code { font-family: var(--mono); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Watching <code>grpc-email</code> parse</h1>
+  <p class="sub">
+    One HTTP request carries the message up while events come back down, the
+    same shape as the gRPC call underneath. The envelope is drawn the moment
+    the server's header block is complete, which is why it shows up before the
+    upload bar fills. Slow the upload to watch it happen.
+  </p>
+</header>
+
+<main>
+  <div class="panel controls">
+    <div>
+      <label for="sample">Message</label>
+      <select id="sample"></select>
+    </div>
+    <div>
+      <label for="pick">…or a local file</label>
+      <input id="pick" type="file" accept=".eml,.msg,message/rfc822">
+    </div>
+    <div class="throttle">
+      <div>
+        <label for="delay">Upload throttle</label>
+        <input id="delay" type="range" min="0" max="120" step="10" value="40">
+      </div>
+      <span class="hint"><span id="delayLabel">40 ms / chunk</span><br><span id="chunkLabel"></span></span>
+    </div>
+    <div class="checks">
+      <label><input id="listAttachments" type="checkbox" checked> attachments</label>
+      <label><input id="includeBytes" type="checkbox"> attachment bytes</label>
+      <label><input id="emitDocument" type="checkbox"> Document fold</label>
+    </div>
+    <button id="run">Stream it</button>
+  </div>
+
+  <div class="panel">
+    <div class="track">
+      <div class="fill" id="fill"></div>
+      <div class="mark" id="mark" title="envelope"></div>
+      <div class="track-label"><span id="fedLabel">idle</span><span id="sizeLabel"></span></div>
+    </div>
+    <p class="verdict idle" id="verdict">Pick a message and press stream.</p>
+  </div>
+
+  <div class="panel stats">
+    <div class="stat"><b id="sEvents">0</b><span>events</span></div>
+    <div class="stat"><b id="sParts">0</b><span>body parts</span></div>
+    <div class="stat"><b id="sAttach">0</b><span>attachments</span></div>
+    <div class="stat"><b id="sMs">0</b><span>ms to envelope</span></div>
+    <div class="stat"><b id="sFmt">&ndash;</b><span>format</span></div>
+  </div>
+
+  <div class="split">
+    <div class="panel">
+      <div id="feed"></div>
+    </div>
+    <div class="panel">
+      <dl id="envelope">
+        <dt>Subject</dt><dd id="eSubject" class="empty">–</dd>
+        <dt>From</dt><dd id="eFrom" class="empty">–</dd>
+        <dt>To</dt><dd id="eTo" class="empty">–</dd>
+        <dt>Date</dt><dd id="eDate" class="empty">–</dd>
+        <dt>Message-ID</dt><dd id="eMsgId" class="empty">–</dd>
+        <dt>Root content type</dt><dd id="eCtype" class="empty">–</dd>
+      </dl>
+    </div>
+  </div>
+</main>
+
+<footer>
+  The throttle delays the <em>upload</em> only, to make streaming visible on a
+  file that would otherwise finish inside one animation frame. The parser never
+  waits for anything but bytes. Try <code>multipart_with_attachments.eml</code>
+  to see a plain and an HTML body part, a regular attachment and an inline
+  image, each as its own event.
+</footer>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const feed = $("feed");
+
+// The bridge injects this meta tag when it serves the page under a path prefix
+// (UI_BASE). Empty when the bridge runs at the root, so calls below are
+// unprefixed and nothing changes.
+const BASE = document.querySelector('meta[name="ui-base"]')?.content ?? "";
+
+/// Keep the DOM bounded. Email events are few, but a huge header list or a
+/// runaway feed should still not grow the page without limit.
+const MAX_ROWS = 600;
+
+let sizeBytes = 0;
+
+const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+const clip = (s, n = 90) => (s.length > n ? s.slice(0, n) + "…" : s);
+const num = (n) => n.toLocaleString("en-US");
+const kb = (n) =>
+  n < 1024 ? `${n} B`
+  : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KiB`
+  : `${(n / 1024 / 1024).toFixed(1)} MiB`;
+
+async function loadSamples() {
+  const { files } = await (await fetch(`${BASE}/api/samples`)).json();
+  $("sample").innerHTML = files.length
+    ? files.map((f) => `<option value="${esc(f.name)}">${esc(f.name)} (${kb(f.size)})</option>`).join("")
+    : `<option value="">no fixtures shipped</option>`;
+  if (files.some((f) => f.name === "multipart_with_attachments.eml")) {
+    $("sample").value = "multipart_with_attachments.eml";
+  }
+}
+
+// A locally picked file wins over the dropdown, so changing the dropdown
+// clears the picker and the two cannot disagree silently.
+$("sample").addEventListener("change", () => { $("pick").value = ""; });
+$("delay").addEventListener("input", (e) => {
+  $("delayLabel").textContent = `${e.target.value} ms / chunk`;
+});
+
+// ---------------------------------------------------------------------------
+// Rendering, batched
+// ---------------------------------------------------------------------------
+//
+// Rows are queued and written on an animation frame rather than as they
+// arrive, so a burst of events costs one layout, not one per event.
+
+let pending = [];
+let scheduled = false;
+let onFlush = null;
+
+function schedule() {
+  if (!scheduled) {
+    scheduled = true;
+    requestAnimationFrame(flush);
+  }
+}
+
+function row(html) {
+  pending.push(html);
+  schedule();
+}
+
+function flush() {
+  scheduled = false;
+  if (onFlush) onFlush();
+  if (pending.length === 0) return;
+
+  const tail = pending.slice(-MAX_ROWS);
+  pending = [];
+
+  const batch = document.createDocumentFragment();
+  for (const html of tail) {
+    const div = document.createElement("div");
+    div.className = "ev new";
+    div.innerHTML = html;
+    batch.append(div);
+  }
+  feed.append(batch);
+  while (feed.childElementCount > MAX_ROWS) feed.firstElementChild.remove();
+  feed.scrollTop = feed.scrollHeight;
+}
+
+const addr = (list, role) =>
+  (list ?? [])
+    .filter((a) => a.role === `ADDRESS_ROLE_${role}`)
+    .map((a) => (a.name ? `${a.name} <${a.address}>` : a.address))
+    .join(", ");
+
+function fillEnvelope(d) {
+  const set = (id, value) => {
+    const el = $(id);
+    el.textContent = value || "–";
+    el.className = value ? "" : "empty";
+  };
+  set("eSubject", d.subject);
+  set("eFrom", addr(d.addresses, "FROM") || addr(d.addresses, "SENDER"));
+  set("eTo", [addr(d.addresses, "TO"), addr(d.addresses, "CC") && `cc: ${addr(d.addresses, "CC")}`]
+    .filter(Boolean).join("; "));
+  set("eDate", d.date?.seconds ? new Date(d.date.seconds * 1000).toUTCString() : "");
+  set("eMsgId", d.messageId);
+  set("eCtype", d.contentType);
+}
+
+/** Render one event as a feed row, or null to skip it. */
+function render(kind, d) {
+  switch (kind) {
+    case "emailInfo":
+      return `<span class="k">envelope</span> <span class="subj">${esc(clip(d.subject) || "(no subject)")}</span>`
+        + ` <span class="k">${esc(d.format.replace("EMAIL_FORMAT_", ""))}, ${d.headers?.length ?? 0} headers</span>`;
+    case "bodyPart":
+      return `<span class="k">body</span> part=${esc(d.partId)} <span class="k">${esc(d.contentTypeRaw)}</span>`
+        + ` <span class="body">${esc(clip(d.text.trim()))}</span>`;
+    case "attachment":
+      return `<span class="att">attachment</span> ${esc(d.filename || "(unnamed)")}`
+        + ` <span class="k">${esc(d.contentType || "unknown type")}, ${num(d.sizeBytes)} B`
+        + `${d.inline ? ", inline" : ""}${d.contentId ? `, cid ${esc(d.contentId)}` : ""}`
+        + `${d.dataBytes ? `, ${num(d.dataBytes)} B on the wire` : ""}</span>`;
+    case "document":
+      return `<span class="k">document</span> ${esc(d.name || "(unnamed)")}`
+        + ` <span class="k">${d.texts} text items, ${d.groups} groups, ${d.pictures} pictures</span>`;
+    case "status": {
+      const warn = (d.warnings ?? []).length
+        ? ` <span class="err">warnings: ${esc(d.warnings.join("; "))}</span>` : "";
+      return `<span class="k">status</span> ${esc(d.state.replace("STATE_", ""))}`
+        + ` <span class="k">${d.bodyParts} body parts, ${d.attachments} attachments, ${num(d.messageBytes)} B</span>${warn}`;
+    }
+    case "grpc-error":
+      return `<span class="err">rpc failed</span> ${esc(d.message)}`;
+    default:
+      return null; // an arm this page has no name for; the contract says ignore it
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The run
+// ---------------------------------------------------------------------------
+
+async function run() {
+  const button = $("run");
+  button.disabled = true;
+  feed.innerHTML = "";
+  pending = [];
+  $("mark").style.display = "none";
+  $("fill").style.width = "0";
+  $("verdict").className = "verdict idle";
+  $("verdict").textContent = "streaming…";
+  for (const id of ["sEvents", "sParts", "sAttach", "sMs"]) $(id).textContent = "0";
+  $("sFmt").textContent = "–";
+  for (const id of ["eSubject", "eFrom", "eTo", "eDate", "eMsgId", "eCtype"]) {
+    $(id).textContent = "–";
+    $(id).className = "empty";
+  }
+
+  try {
+    await stream();
+  } catch (err) {
+    row(`<span class="err">page error</span> ${esc(String(err))}`);
+    flush();
+  } finally {
+    onFlush = null;
+    button.disabled = false;
+  }
+}
+
+async function stream() {
+  const picked = $("pick").files[0];
+  const body = picked
+    ? await picked.arrayBuffer()
+    : await (await fetch(`${BASE}/api/samples/${$("sample").value}`)).arrayBuffer();
+  sizeBytes = body.byteLength;
+  $("sizeLabel").textContent = kb(sizeBytes);
+
+  const params = new URLSearchParams();
+  params.set("filename", picked ? picked.name : $("sample").value);
+  params.set("delayMs", $("delay").value);
+  if (!$("listAttachments").checked) params.set("listAttachments", "0");
+  if ($("includeBytes").checked) params.set("includeBytes", "1");
+  if ($("emitDocument").checked) params.set("emitDocument", "1");
+
+  // Aim for roughly 40 upload steps whatever the message size, so a 600 byte
+  // fixture and a mailbox export both show the same thing. Chunk size changes
+  // nothing about the events, only how finely you get to watch them arrive.
+  const chunkBytes = Math.min(1 << 20, Math.max(16, Math.ceil(sizeBytes / 40)));
+  params.set("chunkBytes", chunkBytes);
+  $("chunkLabel").textContent = `${kb(chunkBytes)} chunks`;
+
+  const started = performance.now();
+  let events = 0, parts = 0, attachments = 0, fed = 0, envelopeAt = null;
+
+  // Counters are read on the animation frame, never written per event.
+  onFlush = () => {
+    $("sEvents").textContent = num(events);
+    $("sParts").textContent = num(parts);
+    $("sAttach").textContent = num(attachments);
+  };
+
+  const res = await fetch(`${BASE}/api/parse?${params}`, { method: "POST", body });
+  if (!res.ok) {
+    const problem = await res.json();
+    row(`<span class="err">${esc(problem.error)}</span>`);
+    flush();
+    return;
+  }
+
+  // SSE over a POST response, so it is parsed by hand: EventSource only does
+  // GET, and the whole point is that the upload and the event stream are one
+  // request.
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let at = 0;
+
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let split;
+    while ((split = buffer.indexOf("\n\n", at)) !== -1) {
+      const raw = buffer.slice(at, split);
+      at = split + 2;
+
+      const nl = raw.indexOf("\n");
+      if (nl < 0 || !raw.startsWith("event: ")) continue;
+      const kind = raw.slice(7, nl);
+      const rest = raw.slice(nl + 1);
+      if (!rest.startsWith("data: ")) continue;
+      const data = JSON.parse(rest.slice(6));
+
+      if (kind === "fed") {
+        fed = data.bytes;
+        $("fill").style.width = `${(fed / sizeBytes) * 100}%`;
+        $("fedLabel").textContent = `${kb(fed)} fed to the parser`;
+        continue;
+      }
+      if (kind === "done") continue;
+
+      events++;
+      if (kind === "bodyPart") parts++;
+      if (kind === "attachment") attachments++;
+      if (kind === "emailInfo") {
+        fillEnvelope(data);
+        $("sFmt").textContent = data.format.replace("EMAIL_FORMAT_", "");
+        if (envelopeAt === null) envelopeAt = markEnvelope(fed, started);
+      }
+
+      const html = render(kind, data);
+      if (html) row(html);
+    }
+
+    // Compact once per read rather than once per frame.
+    if (at > 0) {
+      buffer = buffer.slice(at);
+      at = 0;
+    }
+  }
+
+  flush();
+  finish(events, envelopeAt, performance.now() - started);
+}
+
+/** Place the marker and say how far in the envelope landed. */
+function markEnvelope(fed, started) {
+  const pct = (fed / sizeBytes) * 100;
+  $("mark").style.left = `${pct}%`;
+  $("mark").style.display = "block";
+  $("sMs").textContent = Math.round(performance.now() - started);
+  $("verdict").className = "verdict";
+  $("verdict").innerHTML = `Envelope after <strong>${kb(fed)} of ${kb(sizeBytes)}</strong>`
+    + ` (${pct.toFixed(0)}% uploaded). The rest of the message had not been sent yet.`;
+  return fed;
+}
+
+function finish(events, envelopeAt, wallMs) {
+  if (envelopeAt === null) {
+    $("verdict").className = "verdict idle";
+    $("verdict").textContent = "No envelope arrived. Was that really an email?";
+    return;
+  }
+  $("verdict").innerHTML +=
+    `<br><span class="hint">${num(events)} events, ${kb(sizeBytes)} in `
+    + `${Math.round(wallMs)} ms of browser time (including the throttle, this `
+    + `page and the SSE bridge, so not the service's own speed).</span>`;
+}
+
+$("run").addEventListener("click", run);
+await loadSamples();
+</script>
+</body>
+</html>
