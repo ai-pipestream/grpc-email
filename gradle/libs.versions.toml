@@ -1,6 +1,6 @@
 [versions]
 grpc = "1.83.1"
-protobuf = "4.35.1"
+protobuf = "4.36.0"
 # Jakarta Mail 2.1 reference implementation; brings jakarta.mail-api and
 # angus-activation transitively.
 angusMail = "2.0.5"
