@@ -206,7 +206,7 @@ nothing else.
 
 ## Tests
 
-`./gradlew test` runs 70 tests with no network and no committed binaries.
+`./gradlew test` runs 87 tests with no network and no committed binaries.
 Fixtures are authored in memory: Jakarta Mail writes the `.eml`, and
 `MsgFixtures` builds `.msg` bytes from the MS-OXMSG layout up (compound-file
 streams, property chunks, recipient and attachment storages, an uncompressed

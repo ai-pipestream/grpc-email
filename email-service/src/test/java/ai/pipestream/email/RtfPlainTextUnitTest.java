@@ -1,8 +1,6 @@
 package ai.pipestream.email;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import ai.pipestream.email.parse.RtfPlainText;
 import org.junit.jupiter.api.Test;
@@ -12,13 +10,13 @@ class RtfPlainTextUnitTest {
 
   @Test
   void dropsControlWordsAndKeepsText() {
-    assertEquals("Hello world",
-        RtfPlainText.extract("{\\rtf1\\ansi\\deff0 Hello world}"));
+    assertThat(RtfPlainText.extract("{\\rtf1\\ansi\\deff0 Hello world}"))
+        .isEqualTo("Hello world");
   }
 
   @Test
   void paragraphBreaksBecomeNewlines() {
-    assertEquals("one\ntwo", RtfPlainText.extract("{\\rtf1 one\\par two}"));
+    assertThat(RtfPlainText.extract("{\\rtf1 one\\par two}")).isEqualTo("one\ntwo");
   }
 
   @Test
@@ -26,41 +24,41 @@ class RtfPlainTextUnitTest {
     String rtf = "{\\rtf1\\ansi{\\fonttbl{\\f0\\froman Times New Roman;}}"
         + "{\\colortbl;\\red0\\green0\\blue0;}\\f0 visible}";
     String text = RtfPlainText.extract(rtf);
-    assertEquals("visible", text);
-    assertFalse(text.contains("Times"), "table contents are markup");
+    assertThat(text).isEqualTo("visible");
+    assertThat(text).as("table contents are markup").doesNotContain("Times");
   }
 
   @Test
   void skipsStarDestinations() {
-    assertEquals("kept",
-        RtfPlainText.extract("{\\rtf1{\\*\\generator Riched20 10.0;}kept}"));
+    assertThat(RtfPlainText.extract("{\\rtf1{\\*\\generator Riched20 10.0;}kept}"))
+        .isEqualTo("kept");
   }
 
   @Test
   void decodesHexAndUnicodeEscapes() {
-    assertEquals("café", RtfPlainText.extract("{\\rtf1 caf\\'e9}"));
-    assertEquals("Größe", RtfPlainText.extract("{\\rtf1 Gr\\u246?\\u223?e}"));
+    assertThat(RtfPlainText.extract("{\\rtf1 caf\\'e9}")).isEqualTo("café");
+    assertThat(RtfPlainText.extract("{\\rtf1 Gr\\u246?\\u223?e}")).isEqualTo("Größe");
   }
 
   @Test
   void honoursTheUnicodeSkipCount() {
-    assertEquals("ü!", RtfPlainText.extract("{\\rtf1\\uc2 \\u252??!}"));
+    assertThat(RtfPlainText.extract("{\\rtf1\\uc2 \\u252??!}")).isEqualTo("ü!");
   }
 
   @Test
   void keepsBracesEscapedAsLiterals() {
-    assertEquals("{literal}", RtfPlainText.extract("{\\rtf1 \\{literal\\}}"));
+    assertThat(RtfPlainText.extract("{\\rtf1 \\{literal\\}}")).isEqualTo("{literal}");
   }
 
   @Test
   void emptyAndNullInputAreEmpty() {
-    assertEquals("", RtfPlainText.extract(null));
-    assertEquals("", RtfPlainText.extract(""));
+    assertThat(RtfPlainText.extract(null)).isEmpty();
+    assertThat(RtfPlainText.extract("")).isEmpty();
   }
 
   @Test
   void unbalancedBracesDoNotThrow() {
-    assertTrue(RtfPlainText.extract("{\\rtf1 text").contains("text"));
-    assertEquals("text", RtfPlainText.extract("\\rtf1 text}}}}"));
+    assertThat(RtfPlainText.extract("{\\rtf1 text")).contains("text");
+    assertThat(RtfPlainText.extract("\\rtf1 text}}}}")).isEqualTo("text");
   }
 }

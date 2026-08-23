@@ -1,10 +1,6 @@
 package ai.pipestream.email;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import ai.pipestream.email.server.EmailParseServiceImpl;
 import ai.pipestream.email.v1.Address;
@@ -79,7 +75,7 @@ class EmailParseServiceTest {
     channel.shutdownNow();
     server.shutdownNow();
     executor.shutdown();
-    assertTrue(channel.awaitTermination(5, TimeUnit.SECONDS), "channel drain");
+    assertThat(channel.awaitTermination(5, TimeUnit.SECONDS)).as("channel drain").isTrue();
   }
 
   // --- harness ------------------------------------------------------------
@@ -89,12 +85,16 @@ class EmailParseServiceTest {
 
     ParseStatus status() {
       ParseEmailResponse last = events.get(events.size() - 1);
-      assertTrue(last.hasStatus(), "the last event of a successful parse is the status trailer");
+      assertThat(last.hasStatus())
+          .as("the last event of a successful parse is the status trailer")
+          .isTrue();
       return last.getStatus();
     }
 
     EmailInfo info() {
-      assertTrue(events.get(0).hasEmailInfo(), "the first event is always the envelope");
+      assertThat(events.get(0).hasEmailInfo())
+          .as("the first event is always the envelope")
+          .isTrue();
       return events.get(0).getEmailInfo();
     }
 
@@ -109,7 +109,7 @@ class EmailParseServiceTest {
     }
 
     Status.Code code() {
-      assertNotNull(error, "expected the call to fail");
+      assertThat(error).as("expected the call to fail").isNotNull();
       return ((StatusRuntimeException) error).getStatus().getCode();
     }
   }
@@ -161,7 +161,9 @@ class EmailParseServiceTest {
 
     private ParseEmailResponse awaitEvent() throws InterruptedException {
       ParseEmailResponse event = arrivals.poll(10, TimeUnit.SECONDS);
-      assertNotNull(event, "expected an event; the stream produced nothing in time");
+      assertThat(event)
+          .as("expected an event; the stream produced nothing in time")
+          .isNotNull();
       return event;
     }
 
@@ -173,7 +175,7 @@ class EmailParseServiceTest {
 
     private Result finish() throws InterruptedException {
       requests.onCompleted();
-      assertTrue(done.await(30, TimeUnit.SECONDS), "parse timed out");
+      assertThat(done.await(30, TimeUnit.SECONDS)).as("parse timed out").isTrue();
       synchronized (events) {
         return new Result(List.copyOf(events), failure.get());
       }
@@ -199,7 +201,7 @@ class EmailParseServiceTest {
 
   private static Result parseWhole(byte[] bytes, String documentId) throws InterruptedException {
     Result result = parse(bytes, listing(documentId), bytes.length);
-    assertNull(result.error(), "parse must succeed: " + result.error());
+    assertThat(result.error()).as("parse must succeed").isNull();
     return result;
   }
 
@@ -214,24 +216,30 @@ class EmailParseServiceTest {
   void envelopeArrivesBeforeTheUploadFinishes() throws Exception {
     byte[] message = EmlFixtures.multipartWithAttachments();
     int headerEnd = EmlFixtures.headerBlockEnd(message);
-    assertTrue(headerEnd < message.length / 2,
-        "fixture must have substantially more body than header for this test to mean anything");
+    assertThat(headerEnd)
+        .as("fixture must have substantially more body than header for this test to mean anything")
+        .isLessThan(message.length / 2);
 
     Call call = new Call().options(listing("live-1"));
     call.chunk(message, 0, headerEnd, false);
 
     ParseEmailResponse first = call.awaitEvent();
-    assertTrue(first.hasEmailInfo(), "headers alone must produce the envelope");
-    assertEquals(EmlFixtures.SUBJECT, first.getEmailInfo().getSubject());
-    assertEquals(EmailFormat.EMAIL_FORMAT_EML, first.getEmailInfo().getFormat());
-    assertEquals(1, call.seenSoFar(), "only the envelope is knowable from the headers");
+    assertThat(first.hasEmailInfo()).as("headers alone must produce the envelope").isTrue();
+    assertThat(first.getEmailInfo().getSubject()).isEqualTo(EmlFixtures.SUBJECT);
+    assertThat(first.getEmailInfo().getFormat()).isEqualTo(EmailFormat.EMAIL_FORMAT_EML);
+    assertThat(call.seenSoFar())
+        .as("only the envelope is knowable from the headers")
+        .isEqualTo(1);
 
     call.chunk(message, headerEnd, message.length, true);
     Result result = call.finish();
-    assertNull(result.error());
-    assertEquals(1, result.events().stream().filter(ParseEmailResponse::hasEmailInfo).count(),
-        "the envelope is sent once, not repeated by the body walk");
-    assertFalse(result.bodies().isEmpty(), "the body walk still runs after the early envelope");
+    assertThat(result.error()).isNull();
+    assertThat(result.events().stream().filter(ParseEmailResponse::hasEmailInfo).count())
+        .as("the envelope is sent once, not repeated by the body walk")
+        .isEqualTo(1);
+    assertThat(result.bodies())
+        .as("the body walk still runs after the early envelope")
+        .isNotEmpty();
   }
 
   @Test
@@ -246,13 +254,18 @@ class EmailParseServiceTest {
         statusIndex = index;
       }
     }
-    assertEquals(events.size() - 1, statusIndex, "the status trailer is last and appears once");
-    assertEquals(2, result.bodies().size(), "plain and HTML arrive as two separate events");
-    assertEquals(2, result.attachments().size(), "each attachment is its own event");
-    assertEquals(6, events.size(),
-        "envelope + 2 bodies + 2 attachments + trailer, each as its own message");
+    assertThat(statusIndex)
+        .as("the status trailer is last and appears once")
+        .isEqualTo(events.size() - 1);
+    assertThat(result.bodies())
+        .as("plain and HTML arrive as two separate events")
+        .hasSize(2);
+    assertThat(result.attachments()).as("each attachment is its own event").hasSize(2);
+    assertThat(events)
+        .as("envelope + 2 bodies + 2 attachments + trailer, each as its own message")
+        .hasSize(6);
     for (int index = 0; index < statusIndex; index++) {
-      assertFalse(events.get(index).hasStatus(), "nothing follows the trailer");
+      assertThat(events.get(index).hasStatus()).as("nothing follows the trailer").isFalse();
     }
   }
 
@@ -262,9 +275,22 @@ class EmailParseServiceTest {
     byte[] message = EmlFixtures.multipartWithAttachments();
     Result whole = parse(message, listing("chunk-1"), message.length);
     Result chunked = parse(message, listing("chunk-1"), 64);
-    assertNull(chunked.error());
-    assertEquals(whole.events(), chunked.events(),
-        "the same bytes must produce the same events however they are framed");
+    assertThat(chunked.error()).isNull();
+    assertThat(chunked.events())
+        .as("the same bytes must produce the same events however they are framed")
+        .isEqualTo(whole.events());
+  }
+
+  @Test
+  @DisplayName("even single-byte chunks reassemble into the identical stream")
+  void singleByteChunksMatchSingleChunk() throws Exception {
+    byte[] message = EmlFixtures.plainText();
+    Result whole = parse(message, listing("chunk-tiny"), message.length);
+    Result trickled = parse(message, listing("chunk-tiny"), 1);
+    assertThat(trickled.error()).isNull();
+    assertThat(trickled.events())
+        .as("byte-at-a-time framing exercises every buffer append and sniffer resume")
+        .isEqualTo(whole.events());
   }
 
   // --- .eml ---------------------------------------------------------------
@@ -273,35 +299,37 @@ class EmailParseServiceTest {
   void plainTextEmlRoundTrip() throws Exception {
     Result result = parseWhole(EmlFixtures.plainText(), "eml-plain");
     EmailInfo info = result.info();
-    assertEquals("eml-plain", info.getDocumentId());
-    assertEquals(EmailFormat.EMAIL_FORMAT_EML, info.getFormat());
-    assertEquals(EmlFixtures.SUBJECT, info.getSubject(),
-        "an encoded-word subject arrives decoded, not as =?UTF-8?...?=");
-    assertEquals(EmlFixtures.MESSAGE_ID, info.getMessageId());
-    assertEquals(EmlFixtures.IN_REPLY_TO, info.getInReplyTo());
-    assertEquals(List.of("root-0000@example.com", EmlFixtures.IN_REPLY_TO),
-        info.getReferencesList());
-    assertEquals(EmlFixtures.SENT_MILLIS / 1000, info.getDate().getSeconds());
+    assertThat(info.getDocumentId()).isEqualTo("eml-plain");
+    assertThat(info.getFormat()).isEqualTo(EmailFormat.EMAIL_FORMAT_EML);
+    assertThat(info.getSubject())
+        .as("an encoded-word subject arrives decoded, not as =?UTF-8?...?=")
+        .isEqualTo(EmlFixtures.SUBJECT);
+    assertThat(info.getMessageId()).isEqualTo(EmlFixtures.MESSAGE_ID);
+    assertThat(info.getInReplyTo()).isEqualTo(EmlFixtures.IN_REPLY_TO);
+    assertThat(info.getReferencesList())
+        .containsExactly("root-0000@example.com", EmlFixtures.IN_REPLY_TO);
+    assertThat(info.getDate().getSeconds()).isEqualTo(EmlFixtures.SENT_MILLIS / 1000);
 
     Address from = address(info, AddressRole.ADDRESS_ROLE_FROM).orElseThrow();
-    assertEquals(EmlFixtures.FROM_NAME, from.getName());
-    assertEquals(EmlFixtures.FROM_EMAIL, from.getAddress());
-    assertEquals(EmlFixtures.TO_EMAIL,
-        address(info, AddressRole.ADDRESS_ROLE_TO).orElseThrow().getAddress());
-    assertEquals(EmlFixtures.CC_EMAIL,
-        address(info, AddressRole.ADDRESS_ROLE_CC).orElseThrow().getAddress());
-    assertTrue(info.getHeadersList().stream().anyMatch(h -> h.getName().equals("MIME-Version")),
-        "the lossless header tail keeps fields with no typed home");
+    assertThat(from.getName()).isEqualTo(EmlFixtures.FROM_NAME);
+    assertThat(from.getAddress()).isEqualTo(EmlFixtures.FROM_EMAIL);
+    assertThat(address(info, AddressRole.ADDRESS_ROLE_TO).orElseThrow().getAddress())
+        .isEqualTo(EmlFixtures.TO_EMAIL);
+    assertThat(address(info, AddressRole.ADDRESS_ROLE_CC).orElseThrow().getAddress())
+        .isEqualTo(EmlFixtures.CC_EMAIL);
+    assertThat(info.getHeadersList())
+        .as("the lossless header tail keeps fields with no typed home")
+        .anyMatch(h -> h.getName().equals("MIME-Version"));
 
-    assertEquals(1, result.bodies().size());
+    assertThat(result.bodies()).hasSize(1);
     BodyPart body = result.bodies().get(0);
-    assertEquals(BodyMediaType.BODY_MEDIA_TYPE_PLAIN, body.getMediaType());
-    assertEquals("1", body.getPartId());
-    assertEquals(EmlFixtures.PLAIN_BODY, body.getText());
-    assertEquals("UTF-8", body.getCharset());
-    assertEquals(ParseStatus.State.STATE_OK, result.status().getState());
-    assertEquals(1, result.status().getBodyParts());
-    assertEquals(0, result.status().getAttachments());
+    assertThat(body.getMediaType()).isEqualTo(BodyMediaType.BODY_MEDIA_TYPE_PLAIN);
+    assertThat(body.getPartId()).isEqualTo("1");
+    assertThat(body.getText()).isEqualTo(EmlFixtures.PLAIN_BODY);
+    assertThat(body.getCharset()).isEqualTo("UTF-8");
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_OK);
+    assertThat(result.status().getBodyParts()).isEqualTo(1);
+    assertThat(result.status().getAttachments()).isZero();
   }
 
   @Test
@@ -309,29 +337,34 @@ class EmailParseServiceTest {
     Result result = parseWhole(EmlFixtures.multipartWithAttachments(), "eml-multi");
 
     List<BodyPart> bodies = result.bodies();
-    assertEquals(BodyMediaType.BODY_MEDIA_TYPE_PLAIN, bodies.get(0).getMediaType());
-    assertEquals(EmlFixtures.PLAIN_BODY, bodies.get(0).getText());
-    assertEquals("1.1.1", bodies.get(0).getPartId(), "part ids follow the MIME tree");
-    assertEquals(BodyMediaType.BODY_MEDIA_TYPE_HTML, bodies.get(1).getMediaType());
-    assertEquals(EmlFixtures.HTML_BODY, bodies.get(1).getText(),
-        "HTML is passed through verbatim for the HTML collector, not parsed here");
+    assertThat(bodies.get(0).getMediaType()).isEqualTo(BodyMediaType.BODY_MEDIA_TYPE_PLAIN);
+    assertThat(bodies.get(0).getText()).isEqualTo(EmlFixtures.PLAIN_BODY);
+    assertThat(bodies.get(0).getPartId())
+        .as("part ids follow the MIME tree")
+        .isEqualTo("1.1.1");
+    assertThat(bodies.get(1).getMediaType()).isEqualTo(BodyMediaType.BODY_MEDIA_TYPE_HTML);
+    assertThat(bodies.get(1).getText())
+        .as("HTML is passed through verbatim for the HTML collector, not parsed here")
+        .isEqualTo(EmlFixtures.HTML_BODY);
 
     List<Attachment> attachments = result.attachments();
-    assertEquals(EmlFixtures.ATTACHMENT_NAME, attachments.get(0).getFilename());
-    assertEquals("application/pdf", attachments.get(0).getContentType());
-    assertEquals(EmlFixtures.ATTACHMENT_BYTES.length, attachments.get(0).getSizeBytes());
-    assertFalse(attachments.get(0).getInline());
-    assertTrue(attachments.get(0).getData().isEmpty(),
-        "bytes stay off the wire unless the client asks for them");
-    assertEquals(EmlFixtures.INLINE_NAME, attachments.get(1).getFilename());
-    assertEquals(EmlFixtures.INLINE_CONTENT_ID, attachments.get(1).getContentId());
-    assertTrue(attachments.get(1).getInline());
+    assertThat(attachments.get(0).getFilename()).isEqualTo(EmlFixtures.ATTACHMENT_NAME);
+    assertThat(attachments.get(0).getContentType()).isEqualTo("application/pdf");
+    assertThat(attachments.get(0).getSizeBytes())
+        .isEqualTo(EmlFixtures.ATTACHMENT_BYTES.length);
+    assertThat(attachments.get(0).getInline()).isFalse();
+    assertThat(attachments.get(0).getData().isEmpty())
+        .as("bytes stay off the wire unless the client asks for them")
+        .isTrue();
+    assertThat(attachments.get(1).getFilename()).isEqualTo(EmlFixtures.INLINE_NAME);
+    assertThat(attachments.get(1).getContentId()).isEqualTo(EmlFixtures.INLINE_CONTENT_ID);
+    assertThat(attachments.get(1).getInline()).isTrue();
 
     ParseStatus status = result.status();
-    assertEquals(2, status.getBodyParts());
-    assertEquals(2, status.getAttachments());
-    assertEquals(EmlFixtures.ATTACHMENT_BYTES.length + EmlFixtures.INLINE_BYTES.length,
-        status.getAttachmentBytes());
+    assertThat(status.getBodyParts()).isEqualTo(2);
+    assertThat(status.getAttachments()).isEqualTo(2);
+    assertThat(status.getAttachmentBytes())
+        .isEqualTo(EmlFixtures.ATTACHMENT_BYTES.length + EmlFixtures.INLINE_BYTES.length);
   }
 
   @Test
@@ -339,13 +372,14 @@ class EmailParseServiceTest {
     byte[] message = EmlFixtures.multipartWithAttachments();
     Result withBytes = parse(message, ParseEmailOptions.newBuilder()
         .setDocumentId("eml-bytes").setIncludeAttachmentBytes(true).build(), message.length);
-    assertNull(withBytes.error());
-    assertEquals(2, withBytes.attachments().size(),
-        "asking for bytes implies asking for the listing");
-    assertEquals(ByteString.copyFrom(EmlFixtures.ATTACHMENT_BYTES),
-        withBytes.attachments().get(0).getData());
-    assertEquals(ByteString.copyFrom(EmlFixtures.INLINE_BYTES),
-        withBytes.attachments().get(1).getData());
+    assertThat(withBytes.error()).isNull();
+    assertThat(withBytes.attachments())
+        .as("asking for bytes implies asking for the listing")
+        .hasSize(2);
+    assertThat(withBytes.attachments().get(0).getData())
+        .isEqualTo(ByteString.copyFrom(EmlFixtures.ATTACHMENT_BYTES));
+    assertThat(withBytes.attachments().get(1).getData())
+        .isEqualTo(ByteString.copyFrom(EmlFixtures.INLINE_BYTES));
   }
 
   @Test
@@ -353,31 +387,34 @@ class EmailParseServiceTest {
     byte[] message = EmlFixtures.multipartWithAttachments();
     Result result = parse(message,
         ParseEmailOptions.newBuilder().setDocumentId("eml-quiet").build(), message.length);
-    assertNull(result.error());
-    assertTrue(result.attachments().isEmpty(), "list_attachments defaults to off");
-    assertEquals(2, result.status().getAttachments(),
-        "the trailer still reports what the message carried");
+    assertThat(result.error()).isNull();
+    assertThat(result.attachments()).as("list_attachments defaults to off").isEmpty();
+    assertThat(result.status().getAttachments())
+        .as("the trailer still reports what the message carried")
+        .isEqualTo(2);
   }
 
   @Test
   void unknownCharsetDegradesWithAWarningInsteadOfFailing() throws Exception {
     Result result = parseWhole(EmlFixtures.bogusCharset(), "eml-charset");
-    assertEquals(1, result.bodies().size());
-    assertFalse(result.bodies().get(0).getText().isEmpty(), "the text survives the bad charset");
-    assertEquals(ParseStatus.State.STATE_PARTIAL, result.status().getState());
-    assertTrue(result.status().getWarningsList().stream()
-            .anyMatch(warning -> warning.contains("charset")),
-        "a degraded decode is reported: " + result.status().getWarningsList());
+    assertThat(result.bodies()).hasSize(1);
+    assertThat(result.bodies().get(0).getText())
+        .as("the text survives the bad charset")
+        .isNotEmpty();
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
+    assertThat(result.status().getWarningsList())
+        .as("a degraded decode is reported")
+        .anyMatch(warning -> warning.contains("charset"));
   }
 
   @Test
   void unnamedAttachmentWarnsButStillStreams() throws Exception {
     Result result = parseWhole(EmlFixtures.unnamedAttachment(), "eml-unnamed");
-    assertEquals(1, result.attachments().size());
-    assertEquals("", result.attachments().get(0).getFilename());
-    assertEquals(ParseStatus.State.STATE_PARTIAL, result.status().getState());
-    assertTrue(result.status().getWarningsList().stream()
-        .anyMatch(warning -> warning.contains("no filename")));
+    assertThat(result.attachments()).hasSize(1);
+    assertThat(result.attachments().get(0).getFilename()).isEmpty();
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
+    assertThat(result.status().getWarningsList())
+        .anyMatch(warning -> warning.contains("no filename"));
   }
 
   // --- .msg ---------------------------------------------------------------
@@ -386,43 +423,45 @@ class EmailParseServiceTest {
   void outlookMsgRoundTrip() throws Exception {
     Result result = parseWhole(MsgFixtures.full(), "msg-1");
     EmailInfo info = result.info();
-    assertEquals(EmailFormat.EMAIL_FORMAT_MSG, info.getFormat());
-    assertEquals(MsgFixtures.SUBJECT, info.getSubject());
-    assertEquals(MsgFixtures.MESSAGE_ID, info.getMessageId());
-    assertEquals(MsgFixtures.SUBMIT_TIME_MILLIS / 1000, info.getDate().getSeconds());
-    assertEquals(MsgFixtures.DELIVERY_TIME_MILLIS / 1000, info.getReceivedDate().getSeconds());
+    assertThat(info.getFormat()).isEqualTo(EmailFormat.EMAIL_FORMAT_MSG);
+    assertThat(info.getSubject()).isEqualTo(MsgFixtures.SUBJECT);
+    assertThat(info.getMessageId()).isEqualTo(MsgFixtures.MESSAGE_ID);
+    assertThat(info.getDate().getSeconds()).isEqualTo(MsgFixtures.SUBMIT_TIME_MILLIS / 1000);
+    assertThat(info.getReceivedDate().getSeconds())
+        .isEqualTo(MsgFixtures.DELIVERY_TIME_MILLIS / 1000);
 
-    assertEquals(MsgFixtures.SENDER_EMAIL,
-        address(info, AddressRole.ADDRESS_ROLE_FROM).orElseThrow().getAddress());
-    assertEquals(MsgFixtures.TO_EMAIL,
-        address(info, AddressRole.ADDRESS_ROLE_TO).orElseThrow().getAddress());
-    assertEquals(MsgFixtures.CC_EMAIL,
-        address(info, AddressRole.ADDRESS_ROLE_CC).orElseThrow().getAddress(),
-        "PidTagRecipientType 2 maps to cc");
-    assertEquals(MsgFixtures.BCC_EMAIL,
-        address(info, AddressRole.ADDRESS_ROLE_BCC).orElseThrow().getAddress(),
-        "PidTagRecipientType 3 maps to bcc");
+    assertThat(address(info, AddressRole.ADDRESS_ROLE_FROM).orElseThrow().getAddress())
+        .isEqualTo(MsgFixtures.SENDER_EMAIL);
+    assertThat(address(info, AddressRole.ADDRESS_ROLE_TO).orElseThrow().getAddress())
+        .isEqualTo(MsgFixtures.TO_EMAIL);
+    assertThat(address(info, AddressRole.ADDRESS_ROLE_CC).orElseThrow().getAddress())
+        .as("PidTagRecipientType 2 maps to cc")
+        .isEqualTo(MsgFixtures.CC_EMAIL);
+    assertThat(address(info, AddressRole.ADDRESS_ROLE_BCC).orElseThrow().getAddress())
+        .as("PidTagRecipientType 3 maps to bcc")
+        .isEqualTo(MsgFixtures.BCC_EMAIL);
 
-    assertEquals("parent-0000@example.com", info.getInReplyTo(),
-        "transport headers fill in what MAPI has no property for");
-    assertTrue(info.getHeadersList().stream()
-        .anyMatch(h -> h.getName().equals("X-Court-Docket") && h.getValue().equals("24-1183")));
+    assertThat(info.getInReplyTo())
+        .as("transport headers fill in what MAPI has no property for")
+        .isEqualTo("parent-0000@example.com");
+    assertThat(info.getHeadersList())
+        .anyMatch(h -> h.getName().equals("X-Court-Docket") && h.getValue().equals("24-1183"));
 
     List<BodyPart> bodies = result.bodies();
-    assertEquals(2, bodies.size());
-    assertEquals(MsgFixtures.PLAIN_BODY, bodies.get(0).getText());
-    assertEquals("PidTagBody", bodies.get(0).getSourceProperty());
-    assertEquals(BodyMediaType.BODY_MEDIA_TYPE_HTML, bodies.get(1).getMediaType());
-    assertEquals(MsgFixtures.HTML_BODY, bodies.get(1).getText());
-    assertEquals("PidTagHtml", bodies.get(1).getSourceProperty());
+    assertThat(bodies).hasSize(2);
+    assertThat(bodies.get(0).getText()).isEqualTo(MsgFixtures.PLAIN_BODY);
+    assertThat(bodies.get(0).getSourceProperty()).isEqualTo("PidTagBody");
+    assertThat(bodies.get(1).getMediaType()).isEqualTo(BodyMediaType.BODY_MEDIA_TYPE_HTML);
+    assertThat(bodies.get(1).getText()).isEqualTo(MsgFixtures.HTML_BODY);
+    assertThat(bodies.get(1).getSourceProperty()).isEqualTo("PidTagHtml");
 
     List<Attachment> attachments = result.attachments();
-    assertEquals(2, attachments.size());
-    assertEquals(MsgFixtures.ATTACHMENT_NAME, attachments.get(0).getFilename());
-    assertEquals("application/pdf", attachments.get(0).getContentType());
-    assertEquals(MsgFixtures.ATTACHMENT_BYTES.length, attachments.get(0).getSizeBytes());
-    assertEquals(MsgFixtures.INLINE_CONTENT_ID, attachments.get(1).getContentId());
-    assertTrue(attachments.get(1).getInline());
+    assertThat(attachments).hasSize(2);
+    assertThat(attachments.get(0).getFilename()).isEqualTo(MsgFixtures.ATTACHMENT_NAME);
+    assertThat(attachments.get(0).getContentType()).isEqualTo("application/pdf");
+    assertThat(attachments.get(0).getSizeBytes()).isEqualTo(MsgFixtures.ATTACHMENT_BYTES.length);
+    assertThat(attachments.get(1).getContentId()).isEqualTo(MsgFixtures.INLINE_CONTENT_ID);
+    assertThat(attachments.get(1).getInline()).isTrue();
   }
 
   @Test
@@ -430,22 +469,24 @@ class EmailParseServiceTest {
     String rtf = "{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0 Times;}}"
         + "\\f0 Hearing set for the 14th.\\par Bring the exhibits.\\par}";
     Result result = parseWhole(MsgFixtures.rtfOnly(rtf), "msg-rtf");
-    assertEquals(1, result.bodies().size());
+    assertThat(result.bodies()).hasSize(1);
     BodyPart body = result.bodies().get(0);
-    assertEquals(BodyMediaType.BODY_MEDIA_TYPE_PLAIN, body.getMediaType());
-    assertEquals("PidTagRtfCompressed", body.getSourceProperty());
-    assertTrue(body.getText().contains("Hearing set for the 14th."), body.getText());
-    assertFalse(body.getText().contains("Times"), "the font table is markup, not body text");
-    assertEquals(ParseStatus.State.STATE_PARTIAL, result.status().getState());
-    assertTrue(result.status().getWarningsList().stream()
-        .anyMatch(warning -> warning.contains("RTF-only")));
+    assertThat(body.getMediaType()).isEqualTo(BodyMediaType.BODY_MEDIA_TYPE_PLAIN);
+    assertThat(body.getSourceProperty()).isEqualTo("PidTagRtfCompressed");
+    assertThat(body.getText()).contains("Hearing set for the 14th.");
+    assertThat(body.getText())
+        .as("the font table is markup, not body text")
+        .doesNotContain("Times");
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
+    assertThat(result.status().getWarningsList())
+        .anyMatch(warning -> warning.contains("RTF-only"));
   }
 
   @Test
   void ole2ThatIsNotAMapiMessageIsUnimplemented() throws Exception {
     byte[] container = MsgFixtures.ole2ButNotMapi();
     Result result = parse(container, listing("msg-not"), container.length);
-    assertEquals(Status.Code.UNIMPLEMENTED, result.code());
+    assertThat(result.code()).isEqualTo(Status.Code.UNIMPLEMENTED);
   }
 
   @Test
@@ -454,7 +495,7 @@ class EmailParseServiceTest {
     byte[] half = new byte[full.length / 2];
     System.arraycopy(full, 0, half, 0, half.length);
     Result result = parse(half, listing("msg-cut"), half.length);
-    assertEquals(Status.Code.INVALID_ARGUMENT, result.code());
+    assertThat(result.code()).isEqualTo(Status.Code.INVALID_ARGUMENT);
   }
 
   // --- error model --------------------------------------------------------
@@ -466,25 +507,30 @@ class EmailParseServiceTest {
       noise[index] = (byte) (index * 31 + 7);
     }
     Result result = parse(noise, listing("junk"), noise.length);
-    assertEquals(Status.Code.UNIMPLEMENTED, result.code());
-    assertTrue(result.events().isEmpty(), "nothing is emitted for bytes we cannot identify");
+    assertThat(result.code()).isEqualTo(Status.Code.UNIMPLEMENTED);
+    assertThat(result.events())
+        .as("nothing is emitted for bytes we cannot identify")
+        .isEmpty();
   }
 
   @Test
   void colonShapedTextThatIsNotMailIsUnimplemented() throws Exception {
     byte[] text = EmlFixtures.notMailButColonShaped();
     Result result = parse(text, listing("not-mail"), text.length);
-    assertEquals(Status.Code.UNIMPLEMENTED, result.code());
-    assertTrue(result.events().isEmpty(), "no envelope is invented for a non-mail header block");
+    assertThat(result.code()).isEqualTo(Status.Code.UNIMPLEMENTED);
+    assertThat(result.events())
+        .as("no envelope is invented for a non-mail header block")
+        .isEmpty();
   }
 
   @Test
   void truncatedHeaderBlockIsInvalidArgument() throws Exception {
     byte[] cut = EmlFixtures.truncatedHeaderBlock();
     Result result = parse(cut, listing("cut"), cut.length);
-    assertEquals(Status.Code.INVALID_ARGUMENT, result.code());
-    assertTrue(result.events().isEmpty(),
-        "headers that never ended are a truncated upload, not an envelope");
+    assertThat(result.code()).isEqualTo(Status.Code.INVALID_ARGUMENT);
+    assertThat(result.events())
+        .as("headers that never ended are a truncated upload, not an envelope")
+        .isEmpty();
   }
 
   @Test
@@ -495,11 +541,14 @@ class EmailParseServiceTest {
     System.arraycopy(message, 0, partial, 0, cut);
     Result result = parse(partial, listing("body-cut"), partial.length);
 
-    assertFalse(result.events().isEmpty(), "the envelope was knowable and must have been sent");
-    assertTrue(result.events().get(0).hasEmailInfo());
+    assertThat(result.events())
+        .as("the envelope was knowable and must have been sent")
+        .isNotEmpty();
+    assertThat(result.events().get(0).hasEmailInfo()).isTrue();
     if (result.error() != null) {
-      assertEquals(Status.Code.INVALID_ARGUMENT, result.code(),
-          "a truncated MIME tree is bad input, never an INTERNAL fault");
+      assertThat(result.code())
+          .as("a truncated MIME tree is bad input, never an INTERNAL fault")
+          .isEqualTo(Status.Code.INVALID_ARGUMENT);
     }
   }
 
@@ -507,7 +556,7 @@ class EmailParseServiceTest {
   void oversizeMessageIsResourceExhausted() throws Exception {
     byte[] big = new byte[(int) MESSAGE_CAP + 1];
     Result result = parse(big, listing("big"), big.length);
-    assertEquals(Status.Code.RESOURCE_EXHAUSTED, result.code());
+    assertThat(result.code()).isEqualTo(Status.Code.RESOURCE_EXHAUSTED);
   }
 
   @Test
@@ -517,20 +566,22 @@ class EmailParseServiceTest {
         ParseEmailOptions.newBuilder().setDocumentId("cap").setMaxDocumentMib(1)
             .setListAttachments(true).build(),
         message.length);
-    assertNull(lowered.error(), "a small message fits a 1 MiB ceiling");
+    assertThat(lowered.error()).as("a small message fits a 1 MiB ceiling").isNull();
 
     byte[] big = new byte[2 * 1024 * 1024];
     Result rejected = parse(big,
         ParseEmailOptions.newBuilder().setDocumentId("cap").setMaxDocumentMib(1).build(),
         big.length);
-    assertEquals(Status.Code.RESOURCE_EXHAUSTED, rejected.code(),
-        "the client's own lower ceiling is enforced");
+    assertThat(rejected.code())
+        .as("the client's own lower ceiling is enforced")
+        .isEqualTo(Status.Code.RESOURCE_EXHAUSTED);
 
     Result stillCapped = parse(new byte[(int) MESSAGE_CAP + 1],
         ParseEmailOptions.newBuilder().setDocumentId("cap").setMaxDocumentMib(1024).build(),
         1024 * 1024);
-    assertEquals(Status.Code.RESOURCE_EXHAUSTED, stillCapped.code(),
-        "a client cannot raise the server's ceiling");
+    assertThat(stillCapped.code())
+        .as("a client cannot raise the server's ceiling")
+        .isEqualTo(Status.Code.RESOURCE_EXHAUSTED);
   }
 
   @Test
@@ -539,9 +590,10 @@ class EmailParseServiceTest {
         ParseEmailOptions.newBuilder().setDocumentId("attach-cap")
             .setIncludeAttachmentBytes(true).build(),
         Integer.MAX_VALUE);
-    assertNull(result.error());
-    assertTrue(result.attachments().stream().allMatch(a -> a.getSizeBytes() <= ATTACHMENT_CAP),
-        "this fixture is meant to fit; the cap path is asserted by the size fields");
+    assertThat(result.error()).isNull();
+    assertThat(result.attachments())
+        .as("this fixture is meant to fit; the cap path is asserted by the size fields")
+        .allMatch(a -> a.getSizeBytes() <= ATTACHMENT_CAP);
   }
 
   @Test
@@ -550,13 +602,13 @@ class EmailParseServiceTest {
     Call call = new Call().options(listing("no-complete"));
     call.chunk(message, 0, message.length, false);
     Result result = call.finish();
-    assertEquals(Status.Code.INVALID_ARGUMENT, result.code());
+    assertThat(result.code()).isEqualTo(Status.Code.INVALID_ARGUMENT);
   }
 
   @Test
   void emptyUploadIsInvalidArgument() throws Exception {
     Result result = new Call().options(listing("empty")).finish();
-    assertEquals(Status.Code.INVALID_ARGUMENT, result.code());
+    assertThat(result.code()).isEqualTo(Status.Code.INVALID_ARGUMENT);
   }
 
   @Test
@@ -565,14 +617,14 @@ class EmailParseServiceTest {
     Call call = new Call();
     call.chunk(message, 0, message.length, true);
     Result result = call.finish();
-    assertEquals(Status.Code.INVALID_ARGUMENT, result.code());
+    assertThat(result.code()).isEqualTo(Status.Code.INVALID_ARGUMENT);
   }
 
   @Test
   void repeatedOptionsAreInvalidArgument() throws Exception {
     Call call = new Call().options(listing("twice")).options(listing("twice"));
     Result result = call.finish();
-    assertEquals(Status.Code.INVALID_ARGUMENT, result.code());
+    assertThat(result.code()).isEqualTo(Status.Code.INVALID_ARGUMENT);
   }
 
   // --- capability discovery and concurrency ------------------------------
@@ -581,18 +633,28 @@ class EmailParseServiceTest {
   void serviceInfoReportsCapabilities() {
     GetServiceInfoResponse info = EmailParseServiceGrpc.newBlockingStub(channel)
         .getServiceInfo(GetServiceInfoRequest.getDefaultInstance());
-    assertEquals(EmailParseServiceImpl.SERVICE_VERSION, info.getServiceVersion());
-    assertEquals("v1", info.getApiVersion());
-    assertFalse(info.getPoiVersion().isEmpty());
-    assertEquals(List.of(EmailFormat.EMAIL_FORMAT_EML, EmailFormat.EMAIL_FORMAT_MSG),
-        info.getSupportedFormatsList());
-    assertEquals(MESSAGE_CAP, info.getMaxDocumentBytes());
-    assertEquals(ATTACHMENT_CAP, info.getMaxAttachmentBytes());
-    assertEquals(4, info.getMaxConcurrentParses());
-    assertEquals("Email", info.getUi().getTitle());
-    assertEquals("/ui/email", info.getUi().getPath());
-    assertEquals("Email bytes to typed events: envelope, body, attachments",
-        info.getUi().getDescription());
+    assertThat(info.getServiceVersion()).isEqualTo(EmailParseServiceImpl.SERVICE_VERSION);
+    assertThat(info.getApiVersion()).isEqualTo("v1");
+    assertThat(info.getPoiVersion()).isNotEmpty();
+    assertThat(info.getSupportedFormatsList())
+        .containsExactly(EmailFormat.EMAIL_FORMAT_EML, EmailFormat.EMAIL_FORMAT_MSG);
+    assertThat(info.getMaxDocumentBytes()).isEqualTo(MESSAGE_CAP);
+    assertThat(info.getMaxAttachmentBytes()).isEqualTo(ATTACHMENT_CAP);
+    assertThat(info.getMaxConcurrentParses()).isEqualTo(4);
+    assertThat(info.getUi().getTitle()).isEqualTo("Email");
+    assertThat(info.getUi().getPath()).isEqualTo("/ui/email");
+    assertThat(info.getUi().getDescription())
+        .isEqualTo("Email bytes to typed events: envelope, body, attachments");
+  }
+
+  @Test
+  void serviceInfoIsStableAcrossCalls() {
+    var stub = EmailParseServiceGrpc.newBlockingStub(channel);
+    GetServiceInfoResponse first = stub.getServiceInfo(GetServiceInfoRequest.getDefaultInstance());
+    GetServiceInfoResponse second = stub.getServiceInfo(GetServiceInfoRequest.getDefaultInstance());
+    assertThat(second)
+        .as("version discovery is deterministic; the cached mail version never flickers")
+        .isEqualTo(first);
   }
 
   @Test
@@ -618,6 +680,6 @@ class EmailParseServiceTest {
     for (Thread thread : threads) {
       thread.join(TimeUnit.SECONDS.toMillis(30));
     }
-    assertNull(firstFailure.get(), "all concurrent parses must succeed");
+    assertThat(firstFailure.get()).as("all concurrent parses must succeed").isNull();
   }
 }

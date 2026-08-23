@@ -1,8 +1,6 @@
 package ai.pipestream.email;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import ai.pipestream.email.parse.EmailSniffer;
 import java.nio.charset.StandardCharsets;
@@ -23,59 +21,82 @@ class EmailSnifferUnitTest {
   void recognizesTheOle2Signature() {
     byte[] cfb = {(byte) 0xD0, (byte) 0xCF, 0x11, (byte) 0xE0,
         (byte) 0xA1, (byte) 0xB1, 0x1A, (byte) 0xE1, 0, 0};
-    assertTrue(EmailSniffer.isOle2(cfb, cfb.length));
-    assertFalse(EmailSniffer.isOle2(cfb, 4), "a partial signature is not a decision");
-    assertFalse(EmailSniffer.isOle2(ascii("From: a@b\r\n"), 11));
+    assertThat(EmailSniffer.isOle2(cfb, cfb.length)).isTrue();
+    assertThat(EmailSniffer.isOle2(cfb, 4))
+        .as("a partial signature is not a decision")
+        .isFalse();
+    assertThat(EmailSniffer.isOle2(ascii("From: a@b\r\n"), 11)).isFalse();
   }
 
   @Test
   void findsTheHeaderTerminatorForBothLineEndings() {
     byte[] crlf = ascii("From: a@b\r\nSubject: x\r\n\r\nbody");
-    assertEquals(23, EmailSniffer.headerBlockLength(crlf, crlf.length, 0));
+    assertThat(EmailSniffer.headerBlockLength(crlf, crlf.length, 0)).isEqualTo(23);
     byte[] lf = ascii("From: a@b\nSubject: x\n\nbody");
-    assertEquals(21, EmailSniffer.headerBlockLength(lf, lf.length, 0));
+    assertThat(EmailSniffer.headerBlockLength(lf, lf.length, 0)).isEqualTo(21);
   }
 
   @Test
   void reportsNoTerminatorUntilTheBlankLineArrives() {
     byte[] partial = ascii("From: a@b\r\nSubject: x\r\n");
-    assertEquals(-1, EmailSniffer.headerBlockLength(partial, partial.length, 0));
+    assertThat(EmailSniffer.headerBlockLength(partial, partial.length, 0)).isEqualTo(-1);
   }
 
   @Test
   void resumesScanningAcrossAChunkBoundary() {
     byte[] whole = ascii("From: a@b\r\nSubject: x\r\n\r\nbody");
     int firstChunk = 22;
-    assertEquals(-1, EmailSniffer.headerBlockLength(whole, firstChunk, 0));
+    assertThat(EmailSniffer.headerBlockLength(whole, firstChunk, 0)).isEqualTo(-1);
     int resume = EmailSniffer.rescanFrom(firstChunk);
-    assertTrue(resume <= firstChunk);
-    assertEquals(23, EmailSniffer.headerBlockLength(whole, whole.length, resume),
-        "a terminator straddling the boundary is still found");
+    assertThat(resume).isLessThanOrEqualTo(firstChunk);
+    assertThat(EmailSniffer.headerBlockLength(whole, whole.length, resume))
+        .as("a terminator straddling the boundary is still found")
+        .isEqualTo(23);
+  }
+
+  @Test
+  void rescanNeverGoesNegative() {
+    assertThat(EmailSniffer.rescanFrom(0)).isZero();
+    assertThat(EmailSniffer.rescanFrom(1)).isZero();
+    assertThat(EmailSniffer.rescanFrom(2)).isZero();
+    assertThat(EmailSniffer.rescanFrom(10)).isEqualTo(8);
   }
 
   @Test
   void acceptsBlocksWithAKnownMailField() {
     byte[] block = ascii("Received: from x\r\nX-Custom: y\r\n");
-    assertTrue(EmailSniffer.looksLikeHeaderBlock(block, block.length));
+    assertThat(EmailSniffer.looksLikeHeaderBlock(block, block.length)).isTrue();
   }
 
   @Test
   void rejectsColonShapedTextWithNoMailField() {
     byte[] block = ascii("key: value\r\nother: thing\r\n");
-    assertFalse(EmailSniffer.looksLikeHeaderBlock(block, block.length));
+    assertThat(EmailSniffer.looksLikeHeaderBlock(block, block.length)).isFalse();
   }
 
   @Test
   void rejectsBlocksThatDoNotStartWithAField() {
-    assertFalse(EmailSniffer.looksLikeHeaderBlock(ascii("just prose\r\nFrom: a@b\r\n"), 23));
-    assertFalse(EmailSniffer.looksLikeHeaderBlock(ascii("  From: a@b\r\n"), 13),
-        "a continuation line cannot open a header block");
-    assertFalse(EmailSniffer.looksLikeHeaderBlock(new byte[0], 0));
+    assertThat(EmailSniffer.looksLikeHeaderBlock(ascii("just prose\r\nFrom: a@b\r\n"), 23))
+        .isFalse();
+    assertThat(EmailSniffer.looksLikeHeaderBlock(ascii("  From: a@b\r\n"), 13))
+        .as("a continuation line cannot open a header block")
+        .isFalse();
+    assertThat(EmailSniffer.looksLikeHeaderBlock(new byte[0], 0)).isFalse();
   }
 
   @Test
   void acceptsFoldedContinuationLines() {
     byte[] block = ascii("Subject: a very long\r\n  folded subject\r\nTo: a@b\r\n");
-    assertTrue(EmailSniffer.looksLikeHeaderBlock(block, block.length));
+    assertThat(EmailSniffer.looksLikeHeaderBlock(block, block.length)).isTrue();
+  }
+
+  @Test
+  void rejectsFieldNamesWithNonAsciiOrControlCharacters() {
+    assertThat(EmailSniffer.looksLikeHeaderBlock(ascii("Fr om: a@b\r\nTo: c@d\r\n"), 21))
+        .as("a space inside a field name is not RFC 5322")
+        .isFalse();
+    assertThat(EmailSniffer.looksLikeHeaderBlock(ascii(": empty name\r\nTo: c@d\r\n"), 23))
+        .as("a colon with nothing before it is not a field")
+        .isFalse();
   }
 }

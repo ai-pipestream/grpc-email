@@ -38,7 +38,7 @@ Build and test:
 
 ```bash
 ./gradlew build                  # compiles and runs the full test suite
-./gradlew test                   # 70 tests, no network
+./gradlew test                   # 87 tests, no network
 ./gradlew :email-service:run     # listens on :50054
 buf lint
 buf breaking --against '.git#branch=main'
