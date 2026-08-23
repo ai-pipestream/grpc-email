@@ -315,7 +315,7 @@ public final class MsgParser {
       // it, "to" is the only defensible reading of a stored recipient.
       return AddressRole.ADDRESS_ROLE_TO;
     }
-    Object value = values.get(0).getValue();
+    Object value = values.getFirst().getValue();
     int type = value instanceof Number number ? number.intValue() : RECIPIENT_TYPE_TO;
     return switch (type) {
       case RECIPIENT_TYPE_FROM -> AddressRole.ADDRESS_ROLE_FROM;
@@ -344,7 +344,7 @@ public final class MsgParser {
     if (values == null || values.isEmpty()) {
       return null;
     }
-    Object value = values.get(0).getValue();
+    Object value = values.getFirst().getValue();
     return value instanceof Calendar calendar
         ? HeaderProjection.timestamp(calendar.getTimeInMillis())
         : null;

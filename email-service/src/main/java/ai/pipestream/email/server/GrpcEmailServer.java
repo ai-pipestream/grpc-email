@@ -57,22 +57,16 @@ public final class GrpcEmailServer {
         + " concurrent parses)");
 
     if (metricsInterval > 0) {
-      Thread metrics = new Thread(() -> {
+      Thread.ofPlatform().name("grpc-email-metrics").daemon().start(() -> {
         while (true) {
           try {
             TimeUnit.SECONDS.sleep(metricsInterval);
           } catch (InterruptedException interrupted) {
             return;
           }
-          System.out.println("grpc-email metrics: messages{parsed=" + service.parsed.get()
-              + ",rejected=" + service.rejected.get() + ",failed=" + service.failed.get()
-              + "} content{body_parts=" + service.bodyPartsEmitted.get()
-              + ",attachments=" + service.attachmentsSeen.get()
-              + ",bytes=" + service.bytesRead.get() + "}");
+          System.out.println(service.metrics().render());
         }
-      }, "grpc-email-metrics");
-      metrics.setDaemon(true);
-      metrics.start();
+      });
     }
 
     Runtime.getRuntime().addShutdownHook(new Thread(() -> {

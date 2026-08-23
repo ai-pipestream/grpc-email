@@ -21,18 +21,19 @@ import ai.pipestream.email.v1.ParseEmailRequest;
 import ai.pipestream.email.v1.ParseEmailResponse;
 import ai.pipestream.email.v1.ParseStatus;
 import ai.pipestream.email.v1.UiInfo;
+import com.google.protobuf.ByteString;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.net.URI;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Semaphore;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.jar.Attributes;
 import java.util.jar.Manifest;
 
@@ -62,18 +63,15 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
 
   private static final long MIB = 1024L * 1024L;
 
+  /** Read once: the answer cannot change while the JVM is up. */
+  private static final String MAIL_VERSION = readMailVersion();
+
   private final long maxDocumentBytes;
   private final long maxAttachmentBytes;
   private final int maxConcurrentParses;
   private final Semaphore parseSlots;
   private final ExecutorService executor;
-
-  final AtomicLong parsed = new AtomicLong();
-  final AtomicLong rejected = new AtomicLong();
-  final AtomicLong failed = new AtomicLong();
-  final AtomicLong bodyPartsEmitted = new AtomicLong();
-  final AtomicLong attachmentsSeen = new AtomicLong();
-  final AtomicLong bytesRead = new AtomicLong();
+  private final ParseMetrics metrics = new ParseMetrics();
 
   public EmailParseServiceImpl(
       long maxDocumentBytes,
@@ -85,6 +83,11 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
     this.maxConcurrentParses = maxConcurrentParses;
     this.parseSlots = new Semaphore(maxConcurrentParses);
     this.executor = executor;
+  }
+
+  /** The lifetime counters this service keeps; the launcher reports them. */
+  public ParseMetrics metrics() {
+    return metrics;
   }
 
   @Override
@@ -100,7 +103,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
         GetServiceInfoResponse.newBuilder()
             .setServiceVersion(SERVICE_VERSION)
             .setApiVersion(API_VERSION)
-            .setMailVersion(mailVersion())
+            .setMailVersion(MAIL_VERSION)
             .setPoiVersion(org.apache.poi.Version.getVersion())
             .addSupportedFormats(EmailFormat.EMAIL_FORMAT_EML)
             .addSupportedFormats(EmailFormat.EMAIL_FORMAT_MSG)
@@ -124,7 +127,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
    * Implementation-Version {@code Package} exposes, so the manifest is read
    * directly; outside a jar there is nothing to report.
    */
-  private static String mailVersion() {
+  private static String readMailVersion() {
     try {
       URL clazz = jakarta.mail.Session.class.getResource("Session.class");
       if (clazz == null || !"jar".equals(clazz.getProtocol())) {
@@ -240,8 +243,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
         responses.onNext(ParseEmailResponse.newBuilder().setDocument(fold.take()).build());
       }
       responses.onNext(trailer);
-      bodyPartsEmitted.addAndGet(bodyParts);
-      attachmentsSeen.addAndGet(attachments);
+      metrics.contentEmitted(bodyParts, attachments);
     }
   }
 
@@ -288,8 +290,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
       }
       switch (request.getPayloadCase()) {
         case OPTIONS -> onOptions(request.getOptions());
-        case CHUNK -> onChunk(request.getChunk().getData().toByteArray(),
-            request.getChunk().getComplete());
+        case CHUNK -> onChunk(request.getChunk().getData(), request.getChunk().getComplete());
         case PAYLOAD_NOT_SET -> abort(Status.INVALID_ARGUMENT
             .withDescription("request message carries neither options nor a chunk"));
         default -> abort(Status.INVALID_ARGUMENT
@@ -313,19 +314,25 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
       sink = new Sink(responses, options, wire.getEmitDocument());
     }
 
-    private void onChunk(byte[] data, boolean complete) {
+    private void onChunk(ByteString data, boolean complete) {
       if (options == null) {
         abort(Status.INVALID_ARGUMENT
             .withDescription("first message on the stream must be ParseEmailOptions"));
         return;
       }
-      if (buffer.length() + (long) data.length > cap) {
-        rejected.incrementAndGet();
+      if (buffer.length() + (long) data.size() > cap) {
+        metrics.messageRejected();
         abort(Status.RESOURCE_EXHAUSTED
             .withDescription("message exceeds the " + cap + " byte cap"));
         return;
       }
-      buffer.write(data, 0, data.length);
+      try {
+        // Straight into the accumulating buffer; ByteArrayOutputStream
+        // cannot actually raise the IOException the signature declares.
+        data.writeTo(buffer);
+      } catch (IOException impossible) {
+        throw new UncheckedIOException(impossible);
+      }
       if (complete) {
         sawComplete = true;
       }
@@ -377,24 +384,24 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
         return;
       }
       if (options == null) {
-        rejected.incrementAndGet();
+        metrics.messageRejected();
         abort(Status.INVALID_ARGUMENT
             .withDescription("stream closed before ParseEmailOptions was sent"));
         return;
       }
       if (buffer.length() == 0) {
-        rejected.incrementAndGet();
+        metrics.messageRejected();
         abort(Status.INVALID_ARGUMENT.withDescription("no message bytes received"));
         return;
       }
       if (!sawComplete) {
-        rejected.incrementAndGet();
+        metrics.messageRejected();
         abort(Status.INVALID_ARGUMENT
             .withDescription("stream ended without a chunk marked complete"));
         return;
       }
       byte[] bytes = buffer.toByteArray();
-      bytesRead.addAndGet(bytes.length);
+      metrics.bytesReceived(bytes.length);
       executor.execute(() -> run(bytes));
     }
 
@@ -410,15 +417,15 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
         dispatch(bytes);
         sink.trailer(bytes.length);
         responses.onCompleted();
-        parsed.incrementAndGet();
+        metrics.messageParsed();
       } catch (UnsupportedFormatException unsupported) {
-        rejected.incrementAndGet();
+        metrics.messageRejected();
         abort(Status.UNIMPLEMENTED.withDescription(unsupported.getMessage()));
       } catch (InvalidEmailException invalid) {
-        rejected.incrementAndGet();
+        metrics.messageRejected();
         abort(Status.INVALID_ARGUMENT.withDescription(invalid.getMessage()));
       } catch (Exception fault) {
-        failed.incrementAndGet();
+        metrics.messageFailed();
         abort(Status.INTERNAL.withDescription("parser fault: " + fault));
       } finally {
         parseSlots.release();
