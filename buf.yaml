@@ -18,3 +18,9 @@ lint:
 breaking:
   use:
     - FILE
+  ignore:
+    # Same reason as the COMMENTS exemption above: the document schema is a
+    # verbatim vendored copy, so its compatibility is the canonical copy's
+    # business and not this repo's. Resyncing it must not turn the check on
+    # ai/pipestream/email/v1, which this repo does own, into noise.
+    - proto/ai/pipestream/document/v1/document.proto

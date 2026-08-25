@@ -1,9 +1,12 @@
 package ai.pipestream.email;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
 
 import ai.pipestream.document.v1.BaseTextItem;
 import ai.pipestream.document.v1.Document;
+import ai.pipestream.document.v1.EmailMeta;
+import ai.pipestream.document.v1.EmailParty;
 import ai.pipestream.document.v1.TextItemBase;
 import ai.pipestream.email.document.EmailDocumentFold;
 import ai.pipestream.email.server.EmailParseServiceImpl;
@@ -137,6 +140,15 @@ class EmailDocumentWireTest {
         .map(ParseEmailResponse::getAttachment).toList();
   }
 
+  /** The first instance of a header on the envelope event's lossless tail. */
+  private static String headerValue(List<ParseEmailResponse> events, String name) {
+    return events.get(0).getEmailInfo().getHeadersList().stream()
+        .filter(header -> header.getName().equalsIgnoreCase(name))
+        .map(ai.pipestream.email.v1.Header::getValue)
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("the fixture carried no " + name + " header"));
+  }
+
   private static TextItemBase base(BaseTextItem item) {
     return switch (item.getItemCase()) {
       case TITLE -> item.getTitle().getBase();
@@ -232,6 +244,70 @@ class EmailDocumentWireTest {
     assertThat(textsOf(document, BaseTextItem.ItemCase.TEXT))
         .containsExactly(MsgFixtures.PLAIN_BODY);
     assertThat(document.getPictures(0).getImage().getUri()).isEqualTo("part:attach:1");
+  }
+
+  @Test
+  @DisplayName("the .eml envelope reaches the document as typed parties and instants")
+  void emlFillsTheTypedEmailBlock() throws Exception {
+    List<ParseEmailResponse> events = parse(EmlFixtures.multipartWithAttachments(), true);
+    Document document = onlyDocument(events);
+    EmailMeta email = document.getEmail();
+
+    assertThat(email.getFromList())
+        .extracting(EmailParty::getName, EmailParty::getAddress)
+        .containsExactly(tuple(EmlFixtures.FROM_NAME, EmlFixtures.FROM_EMAIL));
+    assertThat(email.getToList())
+        .extracting(EmailParty::getAddress)
+        .containsExactly(EmlFixtures.TO_EMAIL);
+    assertThat(email.getCcList())
+        .extracting(EmailParty::getAddress)
+        .containsExactly(EmlFixtures.CC_EMAIL);
+    assertThat(email.getMessageId()).isEqualTo(EmlFixtures.MESSAGE_ID);
+    assertThat(email.getInReplyToList()).containsExactly(EmlFixtures.IN_REPLY_TO);
+    assertThat(email.getReferencesList())
+        .containsExactly("root-0000@example.com", EmlFixtures.IN_REPLY_TO);
+
+    assertThat(email.getSent()).isEqualTo(events.get(0).getEmailInfo().getDate());
+    assertThat(email.getSent().getSeconds()).isEqualTo(EmlFixtures.SENT_MILLIS / 1000L);
+    assertThat(email.getSentRaw())
+        .as("the raw twin is the Date header exactly as the message wrote it")
+        .isEqualTo(headerValue(events, "Date"));
+    assertThat(document.getSourceMeta().getCreated()).isEqualTo(email.getSent());
+    assertThat(document.getSourceMeta().getCreatedRaw()).isEqualTo(email.getSentRaw());
+    assertThat(document.getSourceMeta().getTitle()).isEqualTo(EmlFixtures.SUBJECT);
+  }
+
+  @Test
+  @DisplayName("an Outlook conversation index reaches the document as bytes")
+  void msgConversationIndexIsBytes() throws Exception {
+    List<ParseEmailResponse> events = parse(MsgFixtures.conversationOnly(), true);
+    EmailMeta email = onlyDocument(events).getEmail();
+    String hex = events.get(0).getEmailInfo().getConversationIndex();
+
+    assertThat(hex).as("the typed stream still spells it in hex").isNotEmpty();
+    assertThat(email.getConversationIndex().toByteArray())
+        .as("the document carries the packed structure Outlook wrote, byte for byte")
+        .isEqualTo(MsgFixtures.CONVERSATION_INDEX);
+    assertThat(email.getConversationIndex().size())
+        .as("hex text would have been twice as long")
+        .isEqualTo(hex.length() / 2);
+    assertThat(email.getConversationTopic()).isEqualTo(MsgFixtures.CONVERSATION_TOPIC);
+    assertThat(email.hasMessageId())
+        .as("a filed message with no transport headers threads on these two alone")
+        .isFalse();
+  }
+
+  @Test
+  @DisplayName("nothing the typed envelope models is duplicated into a string map")
+  void theEnvelopeIsNotAlsoWrittenIntoTheMaps() throws Exception {
+    Document document = onlyDocument(parse(EmlFixtures.multipartWithAttachments(), true));
+
+    assertThat(document.getSourceMeta().getExtraMap().keySet())
+        .as("only the caller's advisory claim is open vocabulary now")
+        .containsExactly("email.declared_content_type");
+    assertThat(document.getBody().getMeta().getCustomFieldsMap())
+        .doesNotContainKeys("email.from", "email.to", "email.cc", "email.bcc", "email.date",
+            "email.message_id", "email.in_reply_to", "email.references");
   }
 
   @Test

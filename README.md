@@ -109,10 +109,14 @@ and with the option off the fold never runs.
 The fold lives in [`EmailDocumentFold`](email-service/src/main/java/ai/pipestream/email/document/EmailDocumentFold.java),
 is fed the very messages the server writes, and is single-pass. What it maps
 is [`docs/design.md` §4](docs/design.md). The short version: the subject
-becomes `Document.name` and a `TitleItem`, the first body child. Envelope
-facts (addresses by role, dates, threading ids, root content type) become
-typed `email.*` key/values in the body group's `meta.custom_fields`, not a
-paragraph of prose and not the raw header list. Each `text/plain` part
+becomes `Document.name` and a `TitleItem`, the first body child. The envelope
+becomes `Document.email`, the schema's own typed slot: every mailbox an
+`EmailParty` with its display name and its addr-spec apart, every threading id
+its own repeated element, the conversation index the packed bytes it is, and
+the sent instant a `Timestamp` beside `sent_raw`, the Date header's own
+spelling. Nothing that has a typed home is also written into a map; the two
+roles the schema does not model (`Reply-To`, `Sender`) stay in the body group's
+`meta.custom_fields`, still split into `name` and `address`. Each `text/plain` part
 becomes one `TextItem` per blank-line-separated paragraph, tagged with its
 `email.part_id`. Listed attachments become a `GROUP_LABEL_LIST` group named
 `attachments`, one line per attachment. An inline image (`inline`, `image/*`,
@@ -212,7 +216,7 @@ nothing else.
 
 ## Tests
 
-`./gradlew test` runs 87 tests with no network and no committed binaries.
+`./gradlew test` runs 123 tests with no network and no committed binaries.
 Fixtures are authored in memory: Jakarta Mail writes the `.eml`, and
 `MsgFixtures` builds `.msg` bytes from the MS-OXMSG layout up (compound-file
 streams, property chunks, recipient and attachment storages, an uncompressed

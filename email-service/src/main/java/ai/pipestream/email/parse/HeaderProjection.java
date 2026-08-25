@@ -197,7 +197,7 @@ public final class HeaderProjection {
     }
     InternetAddress[] mailboxes;
     try {
-      mailboxes = InternetAddress.parseHeader(MimeUtility.unfold(value), false);
+      mailboxes = InternetAddress.parseHeader(ungroup(MimeUtility.unfold(value)), false);
     } catch (AddressException malformed) {
       return parsed;
     }
@@ -210,6 +210,94 @@ public final class HeaderProjection {
       parsed.add(address(role, name, spec));
     }
     return parsed;
+  }
+
+  /**
+   * Flattens RFC 5322 group syntax into the plain mailbox list underneath it.
+   *
+   * <p>{@code "Court staff: clerk@example.gov, bailiff@example.gov;"} is a
+   * group: one display name, then the mailboxes it names, then a semicolon.
+   * Jakarta Mail hands the whole construct back as a single mailbox whose
+   * addr-spec is the entire line, which is not an address anybody can send
+   * to and buries the recipients inside a string. Dropping the group label
+   * and turning its terminator into a separator recovers the mailboxes as
+   * the mailboxes they are; an empty group ({@code "undisclosed-recipients:;"})
+   * correctly yields none.
+   *
+   * <p>The scan honours quoted strings, comments and angle-addrs, so a colon
+   * or semicolon inside any of those is content and is left alone. A value
+   * with no group in it comes back unchanged.
+   *
+   * @param value one unfolded address-list header value
+   * @return the same list with every group replaced by its members
+   */
+  public static String ungroup(String value) {
+    StringBuilder out = new StringBuilder(value.length());
+    int phrase = 0;
+    boolean quoted = false;
+    boolean angle = false;
+    int comment = 0;
+    for (int index = 0; index < value.length(); index++) {
+      char character = value.charAt(index);
+      if (character == '\\' && index + 1 < value.length() && (quoted || comment > 0)) {
+        out.append(character).append(value.charAt(++index));
+        continue;
+      }
+      if (quoted) {
+        out.append(character);
+        quoted = character != '"';
+        continue;
+      }
+      if (comment > 0) {
+        out.append(character);
+        if (character == '(') {
+          comment++;
+        } else if (character == ')') {
+          comment--;
+        }
+        continue;
+      }
+      switch (character) {
+        case '"' -> {
+          quoted = true;
+          out.append(character);
+        }
+        case '(' -> {
+          comment = 1;
+          out.append(character);
+        }
+        case '<' -> {
+          angle = true;
+          out.append(character);
+        }
+        case '>' -> {
+          angle = false;
+          out.append(character);
+        }
+        case ':' -> {
+          if (angle) {
+            out.append(character);
+          } else {
+            // The group's display name is a label, not a recipient.
+            out.setLength(phrase);
+          }
+        }
+        case ';' -> {
+          if (angle) {
+            out.append(character);
+          } else {
+            out.append(',');
+            phrase = out.length();
+          }
+        }
+        case ',' -> {
+          out.append(character);
+          phrase = out.length();
+        }
+        default -> out.append(character);
+      }
+    }
+    return out.toString();
   }
 
   private static String first(InternetHeaders headers, String field) {

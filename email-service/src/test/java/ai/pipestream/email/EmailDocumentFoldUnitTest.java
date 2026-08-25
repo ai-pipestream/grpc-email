@@ -3,12 +3,15 @@ package ai.pipestream.email;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
+import static org.assertj.core.api.Assertions.tuple;
 
 import ai.pipestream.document.v1.BaseTextItem;
 import ai.pipestream.document.v1.ContentLayer;
 import ai.pipestream.document.v1.DocItemLabel;
 import ai.pipestream.document.v1.Document;
 import ai.pipestream.document.v1.DocumentMeta;
+import ai.pipestream.document.v1.EmailMeta;
+import ai.pipestream.document.v1.EmailParty;
 import ai.pipestream.document.v1.GroupItem;
 import ai.pipestream.document.v1.GroupLabel;
 import ai.pipestream.document.v1.PictureItem;
@@ -19,6 +22,7 @@ import ai.pipestream.document.v1.TextItem;
 import ai.pipestream.document.v1.TextItemBase;
 import ai.pipestream.document.v1.TitleItem;
 import ai.pipestream.email.document.EmailDocumentFold;
+import ai.pipestream.email.parse.HeaderProjection;
 import ai.pipestream.email.v1.Address;
 import ai.pipestream.email.v1.AddressRole;
 import ai.pipestream.email.v1.Attachment;
@@ -26,14 +30,17 @@ import ai.pipestream.email.v1.BodyMediaType;
 import ai.pipestream.email.v1.BodyPart;
 import ai.pipestream.email.v1.EmailFormat;
 import ai.pipestream.email.v1.EmailInfo;
+import ai.pipestream.email.v1.Header;
 import ai.pipestream.email.v1.ParseEmailResponse;
 import ai.pipestream.email.v1.ParseStatus;
+import com.google.protobuf.Struct;
 import com.google.protobuf.Timestamp;
 import com.google.protobuf.Value;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.List;
 import java.util.Map;
+import org.assertj.core.groups.Tuple;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -70,8 +77,17 @@ class EmailDocumentFoldUnitTest {
         .build();
   }
 
+  /** The Date header spelling that matches {@link #SENT} to the second. */
+  private static final String SENT_RAW = "Tue, 14 Nov 2023 22:13:20 +0000";
+
+  private static final Timestamp SENT = Timestamp.newBuilder().setSeconds(1_700_000_000L).build();
+
   private static Address address(AddressRole role, String name, String email) {
     return Address.newBuilder().setRole(role).setName(name).setAddress(email).build();
+  }
+
+  private static Header header(String name, String value) {
+    return Header.newBuilder().setName(name).setValue(value).build();
   }
 
   private static EmailInfo envelope() {
@@ -83,7 +99,9 @@ class EmailDocumentFoldUnitTest {
         .addAddresses(address(AddressRole.ADDRESS_ROLE_TO, "Ada Counsel", "ada@example.com"))
         .addAddresses(address(AddressRole.ADDRESS_ROLE_TO, "", "bob@example.com"))
         .addAddresses(address(AddressRole.ADDRESS_ROLE_CC, "", "cc@example.com"))
-        .setDate(Timestamp.newBuilder().setSeconds(1_700_000_000L))
+        .addAddresses(address(AddressRole.ADDRESS_ROLE_REPLY_TO, "Chambers", "chambers@example.gov"))
+        .addAddresses(address(AddressRole.ADDRESS_ROLE_SENDER, "", "mailer@example.gov"))
+        .setDate(SENT)
         .setReceivedDate(Timestamp.newBuilder().setSeconds(1_700_000_060L))
         .setMessageId("eml-0001@example.gov")
         .setInReplyTo("parent-0000@example.com")
@@ -91,6 +109,7 @@ class EmailDocumentFoldUnitTest {
         .addReferences("root-0000@example.com")
         .addReferences("parent-0000@example.com")
         .setContentType("multipart/mixed; boundary=abc")
+        .addHeaders(header("Date", SENT_RAW))
         .build();
   }
 
@@ -157,8 +176,20 @@ class EmailDocumentFoldUnitTest {
     return document.getBody().getMeta().getCustomFieldsMap();
   }
 
-  private static List<String> strings(Value value) {
-    return value.getListValue().getValuesList().stream().map(Value::getStringValue).toList();
+  /**
+   * The mailboxes in an open-vocabulary address value, as (name, address)
+   * pairs. A field the mailbox did not carry reads back as null rather than
+   * as an empty string, which is the whole point of leaving it out.
+   */
+  private static List<Tuple> parties(Value value) {
+    return value.getListValue().getValuesList().stream()
+        .map(Value::getStructValue)
+        .map(party -> tuple(field(party, "name"), field(party, "address")))
+        .toList();
+  }
+
+  private static String field(Struct party, String name) {
+    return party.containsFields(name) ? party.getFieldsOrThrow(name).getStringValue() : null;
   }
 
   private static List<String> childRefs(GroupItem group) {
@@ -213,7 +244,7 @@ class EmailDocumentFoldUnitTest {
   // --- envelope -----------------------------------------------------------
 
   @Test
-  void theEnvelopeBecomesTheNameTheOriginAndTypedKeyValues() {
+  void theEnvelopeBecomesTheNameAndTheOrigin() {
     Document document = foldFullStream();
 
     assertThat(document.getName()).isEqualTo("Docket 24-1183 scheduling order");
@@ -221,24 +252,132 @@ class EmailDocumentFoldUnitTest {
     assertThat(document.getOrigin().getFilename())
         .as("document_id is a correlation id, not the name of a file")
         .isEmpty();
+  }
 
+  @Test
+  @DisplayName("the envelope lands in the schema's typed email slot, split into parties")
+  void theEnvelopeBecomesTypedEmailMeta() {
+    EmailMeta email = foldFullStream().getEmail();
+
+    assertThat(email.getFromList())
+        .extracting(EmailParty::getName, EmailParty::getAddress)
+        .containsExactly(tuple("Clerk of Court", "clerk@example.gov"));
+    assertThat(email.getToList())
+        .as("a display name and an addr-spec are two facts, never one joined string")
+        .extracting(EmailParty::getName, EmailParty::getAddress)
+        .containsExactly(
+            tuple("Ada Counsel", "ada@example.com"),
+            tuple("", "bob@example.com"));
+    assertThat(email.getCcList())
+        .extracting(EmailParty::getName, EmailParty::getAddress)
+        .containsExactly(tuple("", "cc@example.com"));
+    assertThat(email.getBccList())
+        .as("a role the message did not use stays empty rather than carrying a blank party")
+        .isEmpty();
+    assertThat(email.getTo(1).hasName())
+        .as("a bare address has no display name, and none is invented")
+        .isFalse();
+
+    assertThat(email.getMessageId()).isEqualTo("eml-0001@example.gov");
+    assertThat(email.getInReplyToList()).containsExactly("parent-0000@example.com");
+    assertThat(email.getReferencesList())
+        .containsExactly("root-0000@example.com", "parent-0000@example.com");
+    assertThat(email.getSent()).isEqualTo(SENT);
+    assertThat(email.getSentRaw()).isEqualTo(SENT_RAW);
+  }
+
+  @Test
+  @DisplayName("every mailbox in a multi-address header is its own party")
+  void oneHeaderWithSeveralAddressesYieldsOnePartyEach() {
+    EmailDocumentFold fold = new EmailDocumentFold(VERSION);
+    fold.consume(event(EmailInfo.newBuilder()
+        .setDocumentId("many")
+        .setFormat(EmailFormat.EMAIL_FORMAT_EML)
+        .addAddresses(address(AddressRole.ADDRESS_ROLE_TO, "Ada Counsel", "ada@example.com"))
+        .addAddresses(address(AddressRole.ADDRESS_ROLE_TO, "", "bob@example.com"))
+        .addAddresses(address(AddressRole.ADDRESS_ROLE_TO, "Cara Reyes", "cara@example.com"))
+        .build()));
+
+    assertThat(fold.take().getEmail().getToList())
+        .as("one party per mailbox, never one party per header line")
+        .extracting(EmailParty::getAddress)
+        .containsExactly("ada@example.com", "bob@example.com", "cara@example.com");
+  }
+
+  @Test
+  @DisplayName("a comma inside a quoted display name does not split a party in two")
+  void aQuotedDisplayNameKeepsItsComma() {
+    EmailDocumentFold fold = new EmailDocumentFold(VERSION);
+    fold.consume(event(EmailInfo.newBuilder()
+        .setDocumentId("quoted")
+        .setFormat(EmailFormat.EMAIL_FORMAT_EML)
+        .addAllAddresses(HeaderProjection.parseAddressList(
+            "\"Counsel, Ada\" <ada@example.com>, bob@example.com",
+            AddressRole.ADDRESS_ROLE_TO))
+        .build()));
+
+    assertThat(fold.take().getEmail().getToList())
+        .extracting(EmailParty::getName, EmailParty::getAddress)
+        .containsExactly(
+            tuple("Counsel, Ada", "ada@example.com"),
+            tuple("", "bob@example.com"));
+  }
+
+  @Test
+  @DisplayName("threading ids are one element each, never a joined string")
+  void everyThreadingIdIsItsOwnElement() {
+    EmailDocumentFold fold = new EmailDocumentFold(VERSION);
+    fold.consume(event(envelope().toBuilder()
+        .clearInReplyToIds()
+        .addInReplyToIds("first@example.com")
+        .addInReplyToIds("second@example.com")
+        .clearReferences()
+        .addReferences("root@example.com")
+        .addReferences("first@example.com")
+        .addReferences("second@example.com")
+        .build()));
+    EmailMeta email = fold.take().getEmail();
+
+    assertThat(email.getInReplyToList())
+        .as("a reply to a merged thread names several parents; each is an id")
+        .containsExactly("first@example.com", "second@example.com");
+    assertThat(email.getReferencesList())
+        .containsExactly("root@example.com", "first@example.com", "second@example.com");
+    assertThat(email.getInReplyToList())
+        .noneMatch(id -> id.contains(" "));
+  }
+
+  @Test
+  @DisplayName("the two roles the schema does not model stay structured in the open map")
+  void replyToAndSenderStayInTheOpenVocabularyMapAsStructs() {
+    Document document = foldFullStream();
     Map<String, Value> fields = bodyFields(document);
-    assertThat(strings(fields.get("email.from"))).containsExactly(
-        "Clerk of Court <clerk@example.gov>");
-    assertThat(strings(fields.get("email.to"))).containsExactly(
-        "Ada Counsel <ada@example.com>", "bob@example.com");
-    assertThat(strings(fields.get("email.cc"))).containsExactly("cc@example.com");
-    assertThat(fields).doesNotContainKey("email.bcc");
-    assertThat(fields.get("email.date").getStringValue()).isEqualTo("2023-11-14T22:13:20Z");
+
+    assertThat(parties(fields.get("email.reply_to")))
+        .containsExactly(tuple("Chambers", "chambers@example.gov"));
+    assertThat(parties(fields.get("email.sender")))
+        .as("a bare address is a struct with an address and no name, not a display string")
+        .containsExactly(tuple(null, "mailer@example.gov"));
     assertThat(fields.get("email.received_date").getStringValue())
         .isEqualTo("2023-11-14T22:14:20Z");
-    assertThat(fields.get("email.message_id").getStringValue()).isEqualTo("eml-0001@example.gov");
-    assertThat(fields.get("email.in_reply_to").getStringValue())
-        .isEqualTo("parent-0000@example.com");
-    assertThat(strings(fields.get("email.references")))
-        .containsExactly("root-0000@example.com", "parent-0000@example.com");
     assertThat(fields.get("email.content_type").getStringValue())
         .isEqualTo("multipart/mixed; boundary=abc");
+  }
+
+  @Test
+  @DisplayName("nothing with a typed home is duplicated into a map")
+  void factsWithATypedHomeLeaveTheMapsAlone() {
+    Document document = foldFullStream();
+
+    assertThat(bodyFields(document))
+        .as("from, to, cc, bcc, the sent instant and the threading ids all live on email now")
+        .doesNotContainKeys("email.from", "email.to", "email.cc", "email.bcc", "email.date",
+            "email.message_id", "email.in_reply_to", "email.references",
+            "email.conversation_topic", "email.conversation_index");
+    assertThat(document.getSourceMeta().getExtraMap())
+        .doesNotContainKeys("email.from", "email.to", "email.cc", "email.bcc",
+            "email.message_id", "email.in_reply_to", "email.references",
+            "email.conversation_topic", "email.conversation_index");
   }
 
   // --- origin -------------------------------------------------------------
@@ -320,41 +459,57 @@ class EmailDocumentFoldUnitTest {
     assertThat(document.hasSourceMeta()).isTrue();
     assertThat(meta.getTitle()).isEqualTo("Docket 24-1183 scheduling order");
     assertThat(meta.getCreated())
-        .as("the origination date is ISO 8601, not an epoch or a locale format")
-        .isEqualTo("2023-11-14T22:13:20Z");
-
-    Map<String, String> extra = meta.getExtraMap();
-    assertThat(extra.get("email.from")).isEqualTo("Clerk of Court <clerk@example.gov>");
-    assertThat(extra.get("email.to"))
-        .as("extra is map<string, string>, so a role's mailboxes join as the header wrote them")
-        .isEqualTo("Ada Counsel <ada@example.com>, bob@example.com");
-    assertThat(extra.get("email.cc")).isEqualTo("cc@example.com");
-    assertThat(extra.get("email.message_id")).isEqualTo("eml-0001@example.gov");
-    assertThat(extra.get("email.references"))
-        .isEqualTo("root-0000@example.com parent-0000@example.com");
-    assertThat(extra)
-        .as("a role the message did not use is an absent key")
-        .doesNotContainKey("email.bcc");
+        .as("the origination date is an instant, not a rendering of one")
+        .isEqualTo(SENT);
+    assertThat(meta.getCreatedRaw())
+        .as("the twin keeps the header's own spelling beside the parsed instant")
+        .isEqualTo(SENT_RAW);
+    assertThat(meta.getExtraMap())
+        .as("the envelope has a typed home now; extra is for open vocabulary only")
+        .isEmpty();
   }
 
   @Test
-  void threadingIdsReachSourceMetaIncludingAMultiIdInReplyTo() {
+  @DisplayName("a Date header that will not parse sets the raw twin and nothing else")
+  void anUnparseableDateKeepsOnlyItsSpelling() {
     EmailDocumentFold fold = new EmailDocumentFold(VERSION);
     fold.consume(event(envelope().toBuilder()
-        .clearInReplyToIds()
-        .addInReplyToIds("first@example.com")
-        .addInReplyToIds("second@example.com")
+        .clearDate()
+        .clearHeaders()
+        .addHeaders(header("Date", "yesterday afternoon"))
         .build()));
-    Map<String, String> extra = fold.take().getSourceMeta().getExtraMap();
+    Document document = fold.take();
 
-    assertThat(extra.get("email.in_reply_to"))
-        .as("every id the header carried, not just the one the scalar field kept")
-        .isEqualTo("first@example.com second@example.com");
+    assertThat(document.getSourceMeta().hasCreated())
+        .as("nothing invents an instant a message never stated")
+        .isFalse();
+    assertThat(document.getSourceMeta().getCreatedRaw()).isEqualTo("yesterday afternoon");
+    assertThat(document.getEmail().hasSent()).isFalse();
+    assertThat(document.getEmail().getSentRaw()).isEqualTo("yesterday afternoon");
+  }
+
+  @Test
+  @DisplayName("a MAPI date with no header behind it is an instant with no spelling")
+  void aDateFromAPropertyHasNoRawTwin() {
+    EmailDocumentFold fold = new EmailDocumentFold(VERSION);
+    fold.consume(event(EmailInfo.newBuilder()
+        .setDocumentId("filed")
+        .setFormat(EmailFormat.EMAIL_FORMAT_MSG)
+        .setDate(SENT)
+        .build()));
+    Document document = fold.take();
+
+    assertThat(document.getSourceMeta().getCreated()).isEqualTo(SENT);
+    assertThat(document.getSourceMeta().hasCreatedRaw())
+        .as("a MAPI submit time has no header spelling, and none is fabricated")
+        .isFalse();
+    assertThat(document.getEmail().getSent()).isEqualTo(SENT);
+    assertThat(document.getEmail().hasSentRaw()).isFalse();
   }
 
   @Test
   @DisplayName("a stored .msg threads on its conversation properties alone")
-  void conversationPropertiesReachSourceMeta() {
+  void conversationPropertiesReachTheTypedEnvelope() {
     EmailDocumentFold fold = new EmailDocumentFold(VERSION);
     fold.consume(event(EmailInfo.newBuilder()
         .setDocumentId("filed")
@@ -363,24 +518,48 @@ class EmailDocumentFoldUnitTest {
         .setConversationTopic("Docket 24-1183")
         .setConversationIndex("01d9f7a2b3c4d5e6f70809")
         .build()));
-    Map<String, String> extra = fold.take().getSourceMeta().getExtraMap();
+    EmailMeta email = fold.take().getEmail();
 
-    assertThat(extra.get("email.conversation_topic")).isEqualTo("Docket 24-1183");
-    assertThat(extra.get("email.conversation_index")).isEqualTo("01d9f7a2b3c4d5e6f70809");
-    assertThat(extra)
-        .as("a message with no transport headers still gets threading, and invents no msg-id")
-        .doesNotContainKey("email.message_id");
+    assertThat(email.getConversationTopic()).isEqualTo("Docket 24-1183");
+    assertThat(email.getConversationIndex().toByteArray())
+        .as("the index is the packed structure it always was, not text about it")
+        .containsExactly(0x01, 0xd9, 0xf7, 0xa2, 0xb3, 0xc4, 0xd5, 0xe6, 0xf7, 0x08, 0x09);
+    assertThat(email.getConversationIndex().size())
+        .as("hex text would have been twice as long, and would sort by the wrong thing")
+        .isEqualTo(11);
+    assertThat(email.hasMessageId())
+        .as("a message with no transport headers still threads, and invents no msg-id")
+        .isFalse();
   }
 
   @Test
-  void aMessageWithNoEnvelopeFactsHasNoSourceMeta() {
+  @DisplayName("a Thread-Index spelled in base64 decodes to the same kind of bytes")
+  void aBase64ConversationIndexIsAlsoRead() {
+    EmailDocumentFold fold = new EmailDocumentFold(VERSION);
+    fold.consume(event(EmailInfo.newBuilder()
+        .setDocumentId("threaded")
+        .setFormat(EmailFormat.EMAIL_FORMAT_MSG)
+        .setConversationIndex("Adn3orPE1eb3CAk=")
+        .build()));
+
+    assertThat(fold.take().getEmail().getConversationIndex().toByteArray())
+        .containsExactly(0x01, 0xd9, 0xf7, 0xa2, 0xb3, 0xc4, 0xd5, 0xe6, 0xf7, 0x08, 0x09);
+  }
+
+  @Test
+  void aMessageWithNoEnvelopeFactsHasNoSourceMetaAndNoEmailBlock() {
     EmailDocumentFold fold = new EmailDocumentFold(VERSION);
     fold.consume(event(EmailInfo.newBuilder()
         .setDocumentId("bare")
         .setFormat(EmailFormat.EMAIL_FORMAT_MSG)
         .build()));
-    assertThat(fold.take().hasSourceMeta())
+    Document document = fold.take();
+
+    assertThat(document.hasSourceMeta())
         .as("an empty metadata block is worse than none; a consumer cannot tell it apart")
+        .isFalse();
+    assertThat(document.hasEmail())
+        .as("and an empty envelope is not an envelope")
         .isFalse();
   }
 

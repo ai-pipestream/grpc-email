@@ -113,6 +113,78 @@ class HeaderProjectionUnitTest {
   }
 
   @Test
+  @DisplayName("a comma inside a quoted display name is content, not a separator")
+  void aQuotedDisplayNameIsNotSplitOnItsComma() {
+    assertThat(HeaderProjection.parseAddressList(
+        "\"Counsel, Ada\" <ada@example.com>, bob@example.com", AddressRole.ADDRESS_ROLE_TO))
+        .as("splitting on every comma turns one recipient into two broken ones")
+        .extracting(Address::getName, Address::getAddress)
+        .containsExactly(
+            tuple("Counsel, Ada", "ada@example.com"),
+            tuple("", "bob@example.com"));
+  }
+
+  @Test
+  @DisplayName("every address form a mailer writes keeps its name and its addr-spec apart")
+  void eachMailboxFormSplitsIntoItsTwoParts() {
+    assertThat(HeaderProjection.parseAddressList(
+        "ada@example.com", AddressRole.ADDRESS_ROLE_TO))
+        .as("a bare address has no display name, and none is invented")
+        .extracting(Address::getName, Address::getAddress)
+        .containsExactly(tuple("", "ada@example.com"));
+    assertThat(HeaderProjection.parseAddressList(
+        "<ada@example.com>", AddressRole.ADDRESS_ROLE_TO))
+        .as("an angle-addr with no phrase is the same mailbox")
+        .extracting(Address::getName, Address::getAddress)
+        .containsExactly(tuple("", "ada@example.com"));
+    assertThat(HeaderProjection.parseAddressList(
+        "=?UTF-8?Q?Jos=C3=A9?= <jose@example.com>", AddressRole.ADDRESS_ROLE_TO))
+        .as("an encoded-word display name decodes before it is split off")
+        .extracting(Address::getName, Address::getAddress)
+        .containsExactly(tuple("José", "jose@example.com"));
+  }
+
+  @Test
+  @DisplayName("group syntax yields its members, not one address made of the whole line")
+  void aGroupIsFlattenedIntoTheMailboxesItNames() {
+    assertThat(HeaderProjection.parseAddressList(
+        "Court staff: clerk@example.gov, bailiff@example.gov;", AddressRole.ADDRESS_ROLE_TO))
+        .as("the group label is a label; the recipients are the mailboxes inside it")
+        .extracting(Address::getName, Address::getAddress)
+        .containsExactly(
+            tuple("", "clerk@example.gov"),
+            tuple("", "bailiff@example.gov"));
+    assertThat(HeaderProjection.parseAddressList(
+        "Court staff: clerk@example.gov;, \"Counsel, Ada\" <ada@example.com>",
+        AddressRole.ADDRESS_ROLE_TO))
+        .as("a group and a plain mailbox can share one header")
+        .extracting(Address::getName, Address::getAddress)
+        .containsExactly(
+            tuple("", "clerk@example.gov"),
+            tuple("Counsel, Ada", "ada@example.com"));
+    assertThat(HeaderProjection.parseAddressList(
+        "undisclosed-recipients:;", AddressRole.ADDRESS_ROLE_TO))
+        .as("an empty group names nobody, so it yields nobody")
+        .isEmpty();
+  }
+
+  @Test
+  @DisplayName("a colon or semicolon inside a quoted name or a comment is left alone")
+  void groupPunctuationInsideQuotesIsNotGroupPunctuation() {
+    assertThat(HeaderProjection.parseAddressList(
+        "\"Ruiz: Ana\" <ana@example.com>", AddressRole.ADDRESS_ROLE_TO))
+        .extracting(Address::getName, Address::getAddress)
+        .containsExactly(tuple("Ruiz: Ana", "ana@example.com"));
+    assertThat(HeaderProjection.parseAddressList(
+        "bob@example.com (Bob; the clerk)", AddressRole.ADDRESS_ROLE_TO))
+        .extracting(Address::getName, Address::getAddress)
+        .containsExactly(tuple("Bob; the clerk", "bob@example.com"));
+    assertThat(HeaderProjection.ungroup("plain@example.com, other@example.com"))
+        .as("a value with no group in it is handed on untouched")
+        .isEqualTo("plain@example.com, other@example.com");
+  }
+
+  @Test
   void aMultiIdInReplyToIsSplitRatherThanMangled() {
     EmailInfo info = project("""
         From: a@example.com\r
