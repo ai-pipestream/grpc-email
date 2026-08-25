@@ -43,6 +43,12 @@ import org.junit.jupiter.api.Test;
  */
 class EmailDocumentWireTest {
 
+  /** The advisory filename every parse here declares, so origin can be checked. */
+  private static final String SOURCE_FILENAME = "scheduling-order.eml";
+
+  /** A deliberately wrong advisory type: the bytes must still decide. */
+  private static final String DECLARED_CONTENT_TYPE = "application/octet-stream";
+
   private static Server server;
   private static ManagedChannel channel;
   private static ExecutorService executor;
@@ -95,7 +101,8 @@ class EmailDocumentWireTest {
     requests.onNext(ParseEmailRequest.newBuilder()
         .setOptions(ParseEmailOptions.newBuilder()
             .setDocumentId("doc-fold")
-            .setListAttachments(true)
+            .setFilename(SOURCE_FILENAME)
+            .setContentType(DECLARED_CONTENT_TYPE)
             .setEmitDocument(emitDocument))
         .build());
     requests.onNext(ParseEmailRequest.newBuilder()
@@ -157,7 +164,9 @@ class EmailDocumentWireTest {
     ai.pipestream.email.v1.EmailInfo info = events.get(0).getEmailInfo();
     assertThat(document.getName()).isEqualTo(info.getSubject());
     assertThat(document.getOrigin().getMimetype()).isEqualTo(mimetype);
-    assertThat(document.getOrigin().getFilename()).isEqualTo(info.getDocumentId());
+    assertThat(document.getOrigin().getFilename())
+        .as("the filename option, never the correlation id")
+        .isEqualTo(SOURCE_FILENAME);
     assertThat(textsOf(document, BaseTextItem.ItemCase.TITLE)).containsExactly(info.getSubject());
 
     List<String> plain = bodies(events).stream()
@@ -223,6 +232,34 @@ class EmailDocumentWireTest {
     assertThat(textsOf(document, BaseTextItem.ItemCase.TEXT))
         .containsExactly(MsgFixtures.PLAIN_BODY);
     assertThat(document.getPictures(0).getImage().getUri()).isEqualTo("part:attach:1");
+  }
+
+  @Test
+  @DisplayName("the origin block records real provenance rather than placeholders")
+  void originCarriesTheCallersFilenameAndTheMessageFingerprint() throws Exception {
+    byte[] message = EmlFixtures.multipartWithAttachments();
+    Document document = onlyDocument(parse(message, true));
+
+    assertThat(document.getOrigin().getFilename())
+        .as("the advisory filename option is finally read")
+        .isEqualTo(SOURCE_FILENAME);
+    assertThat(document.getOrigin().getFilename())
+        .as("document_id names a correlation, not a file")
+        .isNotEqualTo("doc-fold");
+    assertThat(document.getOrigin().getMimetype())
+        .as("the bytes decide the container type, not the caller's claim")
+        .isEqualTo("message/rfc822");
+    assertThat(document.getSourceMeta().getExtraMap().get("email.declared_content_type"))
+        .isEqualTo(DECLARED_CONTENT_TYPE);
+    assertThat(document.getOrigin().getBinaryHash())
+        .as("the whole message is buffered anyway; the integrity key is free")
+        .isNotZero();
+
+    assertThat(onlyDocument(parse(message.clone(), true)).getOrigin().getBinaryHash())
+        .as("the same message fingerprints the same way across calls")
+        .isEqualTo(document.getOrigin().getBinaryHash());
+    assertThat(onlyDocument(parse(EmlFixtures.plainText(), true)).getOrigin().getBinaryHash())
+        .isNotEqualTo(document.getOrigin().getBinaryHash());
   }
 
   @Test

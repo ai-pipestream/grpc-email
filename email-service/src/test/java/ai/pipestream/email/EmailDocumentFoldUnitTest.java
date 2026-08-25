@@ -30,6 +30,8 @@ import ai.pipestream.email.v1.ParseEmailResponse;
 import ai.pipestream.email.v1.ParseStatus;
 import com.google.protobuf.Timestamp;
 import com.google.protobuf.Value;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
@@ -216,7 +218,9 @@ class EmailDocumentFoldUnitTest {
 
     assertThat(document.getName()).isEqualTo("Docket 24-1183 scheduling order");
     assertThat(document.getOrigin().getMimetype()).isEqualTo("message/rfc822");
-    assertThat(document.getOrigin().getFilename()).isEqualTo("doc-1");
+    assertThat(document.getOrigin().getFilename())
+        .as("document_id is a correlation id, not the name of a file")
+        .isEmpty();
 
     Map<String, Value> fields = bodyFields(document);
     assertThat(strings(fields.get("email.from"))).containsExactly(
@@ -235,6 +239,76 @@ class EmailDocumentFoldUnitTest {
         .containsExactly("root-0000@example.com", "parent-0000@example.com");
     assertThat(fields.get("email.content_type").getStringValue())
         .isEqualTo("multipart/mixed; boundary=abc");
+  }
+
+  // --- origin -------------------------------------------------------------
+
+  @Test
+  @DisplayName("the origin filename is the caller's, and the mimetype is the bytes'")
+  void originHonoursTheAdvisoryOptionsWithoutTrustingThem() {
+    EmailDocumentFold fold = new EmailDocumentFold(VERSION,
+        new EmailDocumentFold.SourceOrigin("scheduling-order.eml", "application/octet-stream"));
+    fold.consume(event(envelope()));
+    Document document = fold.take();
+
+    assertThat(document.getOrigin().getFilename()).isEqualTo("scheduling-order.eml");
+    assertThat(document.getOrigin().getMimetype())
+        .as("the sniffed container type wins; the caller's claim never overwrites it")
+        .isEqualTo("message/rfc822");
+    assertThat(document.getSourceMeta().getExtraMap().get("email.declared_content_type"))
+        .as("the caller's claim is kept where it cannot be mistaken for the real type")
+        .isEqualTo("application/octet-stream");
+  }
+
+  @Test
+  void aCallerWhoDeclaredNothingGetsNoInventedOrigin() {
+    Document document = foldFullStream();
+    assertThat(document.getOrigin().getFilename()).isEmpty();
+    assertThat(document.getSourceMeta().getExtraMap())
+        .doesNotContainKey("email.declared_content_type");
+  }
+
+  @Test
+  @DisplayName("binary_hash fingerprints the message instead of staying zero")
+  void sourceBytesFillTheIntegrityKey() throws Exception {
+    byte[] message = "From: a@example.com\r\n\r\nbody\r\n".getBytes(StandardCharsets.UTF_8);
+
+    EmailDocumentFold fold = new EmailDocumentFold(VERSION);
+    fold.consume(event(envelope()));
+    fold.sourceBytes(message);
+    long hash = fold.take().getOrigin().getBinaryHash();
+
+    assertThat(hash).isNotZero();
+    assertThat(hash)
+        .as("the first eight bytes of SHA-256, big-endian, so the value is portable")
+        .isEqualTo(expectedFingerprint(message));
+
+    EmailDocumentFold same = new EmailDocumentFold(VERSION);
+    same.sourceBytes(message.clone());
+    assertThat(same.take().getOrigin().getBinaryHash())
+        .as("the same bytes fingerprint the same way, which is what makes it a dedup key")
+        .isEqualTo(hash);
+
+    EmailDocumentFold other = new EmailDocumentFold(VERSION);
+    other.sourceBytes("From: b@example.com\r\n\r\nbody\r\n".getBytes(StandardCharsets.UTF_8));
+    assertThat(other.take().getOrigin().getBinaryHash()).isNotEqualTo(hash);
+  }
+
+  @Test
+  void aFoldNeverHandedItsBytesLeavesTheHashUnset() {
+    assertThat(foldFullStream().getOrigin().getBinaryHash())
+        .as("zero still means unknown; nothing invents a fingerprint")
+        .isZero();
+  }
+
+  /** SHA-256 truncated to 64 bits, computed independently of the fold. */
+  private static long expectedFingerprint(byte[] message) throws Exception {
+    byte[] digest = MessageDigest.getInstance("SHA-256").digest(message);
+    long hash = 0;
+    for (int index = 0; index < Long.BYTES; index++) {
+      hash = (hash << 8) | (digest[index] & 0xFFL);
+    }
+    return hash;
   }
 
   @Test

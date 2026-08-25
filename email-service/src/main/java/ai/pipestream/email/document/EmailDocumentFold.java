@@ -29,6 +29,8 @@ import ai.pipestream.email.v1.ParseEmailResponse;
 import com.google.protobuf.ListValue;
 import com.google.protobuf.Timestamp;
 import com.google.protobuf.Value;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -122,6 +124,7 @@ public final class EmailDocumentFold {
   private static final String KEY_REFERENCES = "email.references";
   private static final String KEY_CONVERSATION_TOPIC = "email.conversation_topic";
   private static final String KEY_CONVERSATION_INDEX = "email.conversation_index";
+  private static final String KEY_DECLARED_CONTENT_TYPE = "email.declared_content_type";
 
   /**
    * Joins rendered mailboxes in a DocumentMeta.extra value. Comma-space is
@@ -131,6 +134,7 @@ public final class EmailDocumentFold {
   private static final String ADDRESS_SEPARATOR = ", ";
 
   private final String version;
+  private final SourceOrigin source;
   private final Document.Builder document = Document.newBuilder();
 
   private boolean envelopeSeen;
@@ -139,19 +143,97 @@ public final class EmailDocumentFold {
   private String attachmentsGroupRef;
 
   /**
+   * What the caller said the bytes were, as opposed to what they turned out
+   * to be. Both fields are advisory and neither is used for detection: the
+   * container format always comes from the bytes. The filename is the only
+   * honest source for {@link DocumentOrigin#getFilename()}, and the declared
+   * content type is recorded where it cannot be mistaken for the real one.
+   *
+   * @param filename the caller's {@code ParseEmailOptions.filename}
+   * @param contentType the caller's {@code ParseEmailOptions.content_type}
+   */
+  public record SourceOrigin(String filename, String contentType) {
+
+    /** A caller who told us nothing about the bytes they sent. */
+    public static final SourceOrigin UNKNOWN = new SourceOrigin("", "");
+
+    public SourceOrigin {
+      filename = filename == null ? "" : filename;
+      contentType = contentType == null ? "" : contentType;
+    }
+  }
+
+  /**
+   * Creates a fold for one parse whose caller declared nothing about the
+   * source. Equivalent to {@link #EmailDocumentFold(String, SourceOrigin)}
+   * with {@link SourceOrigin#UNKNOWN}.
+   *
+   * @param serviceVersion this server's own version string
+   */
+  public EmailDocumentFold(String serviceVersion) {
+    this(serviceVersion, SourceOrigin.UNKNOWN);
+  }
+
+  /**
    * Creates a fold for one parse.
    *
    * @param serviceVersion this server's own version string, stamped as
    *     {@link CollectorSource#getVersion()} on every item so a downstream
    *     merge can tell which build produced which fragment
+   * @param source what the caller declared about the bytes it is sending
    */
-  public EmailDocumentFold(String serviceVersion) {
+  public EmailDocumentFold(String serviceVersion, SourceOrigin source) {
     this.version = serviceVersion == null ? "" : serviceVersion;
+    this.source = source == null ? SourceOrigin.UNKNOWN : source;
     document.setSchemaName(SCHEMA_NAME);
     document.getBodyBuilder().setSelfRef(BODY_REF).setContentLayer(ContentLayer.CONTENT_LAYER_BODY);
     document.getFurnitureBuilder()
         .setSelfRef(FURNITURE_REF)
         .setContentLayer(ContentLayer.CONTENT_LAYER_FURNITURE);
+    if (!this.source.filename().isEmpty()) {
+      document.getOriginBuilder().setFilename(this.source.filename());
+    }
+  }
+
+  /**
+   * Records the fingerprint of the message the fold is projecting.
+   *
+   * <p>Called once, with the whole uploaded message, any time before
+   * {@link #take()}. It is a separate call rather than another event because
+   * the bytes are not on the event stream: the server buffers them, and
+   * leaving {@code binary_hash} at zero threw away a free dedup and integrity
+   * key that was already sitting in memory.
+   *
+   * @param message every byte the client uploaded, in order
+   */
+  public void sourceBytes(byte[] message) {
+    document.getOriginBuilder().setBinaryHash(fingerprint(message));
+  }
+
+  /**
+   * The first eight bytes of the SHA-256 of the message, big-endian, read as
+   * an unsigned 64-bit value.
+   *
+   * <p>{@code DocumentOrigin.binary_hash} is a 64-bit slot, so something has
+   * to be truncated into it. A cryptographic digest is the right thing to
+   * truncate: it is stable across JVMs, platforms and releases, which
+   * {@link java.util.Arrays#hashCode(byte[])} is not promised to be, and it
+   * spreads well enough that a truncation collision is not a practical
+   * concern for dedup.
+   */
+  private static long fingerprint(byte[] message) {
+    byte[] digest;
+    try {
+      digest = MessageDigest.getInstance("SHA-256").digest(message);
+    } catch (NoSuchAlgorithmException impossible) {
+      // Every Java platform is required to ship SHA-256.
+      throw new IllegalStateException("SHA-256 is unavailable", impossible);
+    }
+    long hash = 0;
+    for (int index = 0; index < Long.BYTES; index++) {
+      hash = (hash << 8) | (digest[index] & 0xFFL);
+    }
+    return hash;
   }
 
   /**
@@ -215,12 +297,14 @@ public final class EmailDocumentFold {
     String name = info.getSubject().isEmpty() ? info.getDocumentId() : info.getSubject();
     document.setName(name);
 
+    // The mimetype is the one detected from the bytes, never the caller's
+    // advisory content type. The filename comes from the caller's option and
+    // from nowhere else: document_id is a correlation id, and writing it into
+    // the field that means "the name of the source file" made every Document
+    // claim a filename the message never had.
     String mimetype = mimetype(info.getFormat());
-    if (!mimetype.isEmpty() || !info.getDocumentId().isEmpty()) {
-      DocumentOrigin.Builder origin = document.getOriginBuilder().setMimetype(mimetype);
-      if (!info.getDocumentId().isEmpty()) {
-        origin.setFilename(info.getDocumentId());
-      }
+    if (!mimetype.isEmpty()) {
+      document.getOriginBuilder().setMimetype(mimetype);
     }
 
     Map<String, Value> facts = envelopeFacts(info);
@@ -277,6 +361,12 @@ public final class EmailDocumentFold {
         meta.putExtra(key(role), String.join(ADDRESS_SEPARATOR, rendered));
       }
     }
+
+    // The caller's advisory content type, recorded where it cannot be
+    // mistaken for the detected one. origin.mimetype stays what the bytes
+    // said; this is what the caller claimed, and the two disagreeing is a
+    // fact worth keeping rather than one to resolve here.
+    putIfPresent(meta, KEY_DECLARED_CONTENT_TYPE, source.contentType());
 
     putIfPresent(meta, KEY_MESSAGE_ID, info.getMessageId());
     putIfPresent(meta, KEY_IN_REPLY_TO, String.join(" ", info.getInReplyToIdsList()));

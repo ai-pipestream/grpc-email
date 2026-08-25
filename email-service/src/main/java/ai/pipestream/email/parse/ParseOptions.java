@@ -10,6 +10,10 @@ package ai.pipestream.email.parse;
  * record, so nothing downstream has to know the polarity of any of them.
  *
  * @param documentId caller identifier echoed back in EmailInfo
+ * @param filename advisory source filename from the caller, recorded as
+ *     DocumentOrigin.filename and never used for format detection
+ * @param contentType advisory content type from the caller, recorded but
+ *     never trusted; the container format comes from the bytes
  * @param listAttachments emit an Attachment event per attachment
  * @param includeAttachmentBytes populate Attachment.data (implies listing)
  * @param maxAttachmentBytes per-attachment payload cap; larger payloads are
@@ -17,6 +21,8 @@ package ai.pipestream.email.parse;
  */
 public record ParseOptions(
     String documentId,
+    String filename,
+    String contentType,
     boolean listAttachments,
     boolean includeAttachmentBytes,
     long maxAttachmentBytes) {

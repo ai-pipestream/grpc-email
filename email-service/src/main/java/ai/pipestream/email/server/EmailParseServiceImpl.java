@@ -178,7 +178,10 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
         boolean emitDocument) {
       this.responses = responses;
       this.options = options;
-      this.fold = emitDocument ? new EmailDocumentFold(SERVICE_VERSION) : null;
+      this.fold = emitDocument
+          ? new EmailDocumentFold(SERVICE_VERSION,
+              new EmailDocumentFold.SourceOrigin(options.filename(), options.contentType()))
+          : null;
     }
 
     /** The one way out. Everything the client sees, the fold sees first. */
@@ -227,8 +230,12 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
      * has seen the whole stream, then the document goes out ahead of it. The
      * status stays last, because its arrival is what makes the parse a
      * success and nothing may follow it.
+     *
+     * <p>The message bytes come in whole rather than as a length because the
+     * fold fingerprints them for {@code DocumentOrigin.binary_hash}. They are
+     * already buffered for the parse, so this costs one digest and no copy.
      */
-    private synchronized void trailer(long messageBytes) {
+    private synchronized void trailer(byte[] message) {
       ParseStatus.Builder status = ParseStatus.newBuilder()
           .setState(warnings.isEmpty() ? ParseStatus.State.STATE_OK
               : ParseStatus.State.STATE_PARTIAL)
@@ -236,10 +243,11 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
           .setBodyParts(bodyParts)
           .setAttachments(attachments)
           .setAttachmentBytes(attachmentBytes)
-          .setMessageBytes(messageBytes);
+          .setMessageBytes(message.length);
       ParseEmailResponse trailer = ParseEmailResponse.newBuilder().setStatus(status).build();
       if (fold != null) {
         fold.consume(trailer);
+        fold.sourceBytes(message);
         responses.onNext(ParseEmailResponse.newBuilder().setDocument(fold.take()).build());
       }
       responses.onNext(trailer);
@@ -308,6 +316,8 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
       cap = requested > 0 ? Math.min(maxDocumentBytes, requested) : maxDocumentBytes;
       options = new ParseOptions(
           wire.getDocumentId(),
+          wire.getFilename(),
+          wire.getContentType(),
           listAttachments(wire),
           wire.getIncludeAttachmentBytes(),
           maxAttachmentBytes);
@@ -426,7 +436,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
       }
       try {
         dispatch(bytes);
-        sink.trailer(bytes.length);
+        sink.trailer(bytes);
         responses.onCompleted();
         metrics.messageParsed();
       } catch (UnsupportedFormatException unsupported) {
