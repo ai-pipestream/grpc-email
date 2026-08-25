@@ -37,9 +37,19 @@ terminal `complete`.
 
 Options:
 
-- `list_attachments` (bool, default false): names and content types only.
+- `omit_attachment_list` (bool, default false): suppress the attachment
+  listing. Listing is the **default**, so a parse with no options at all
+  still names every attachment; the polarity is inverted because proto3
+  cannot express "unset means true" on a bool, and a Document that
+  silently omits the PDFs a message carried is worse than one that names
+  them. Attachments stay counted in `ParseStatus` either way.
+- `list_attachments` (bool, default false): the historical opt-in, kept
+  for older clients. Redundant now, but an explicit true still outranks
+  `omit_attachment_list`.
 - `include_attachment_bytes` (bool, default false): opt-in; still
-  capped. The coordinator uses this when it will fan attachments out.
+  capped, and it overrides `omit_attachment_list` because a client that
+  asked for payloads asked for the listing. The coordinator uses this
+  when it will fan attachments out.
 - `max_document_mib`: caller-requested byte cap; can lower the server's
   ceiling, never raise it.
 - `emit_document` (bool, default false): opt into the Document projection
@@ -82,6 +92,7 @@ and `buf.yaml` exempts it from the COMMENTS rule for that reason.
 | `text/plain` body | one `TextItem` (`DOC_ITEM_LABEL_TEXT`, `CONTENT_LAYER_BODY`) per blank-line-separated paragraph, each with `meta.custom_fields["email.part_id"]`. Line endings are normalized and paragraphs stripped, so chunking or CRLF cannot change the item list |
 | `text/html` body | **not mapped.** Emitted verbatim on the typed stream for the HTML collector, whose items merge into this fragment additively. Parsing HTML here would fork that job into two implementations |
 | attachment listing | one `GROUP_LABEL_LIST` group named `attachments` under `#/body`, created only when an Attachment event was actually emitted, with a `ListItem` (`enumerated = false`) per attachment reading `filename (content_type, N bytes)` plus `email.part_id`. An unnamed part reads `(unnamed)`, an untyped one `unknown type`; no filename or MIME type is invented |
+| attachment registry | additionally one `SubDocumentRef` in `Document.attachments` per attachment: `id = "part:" + part_id` (the same pointer the inline-image `ImageRef` uses), `name`, `media_type`, `size_bytes`, and `item_ref` naming the list item that mentions it. This is the fan-out surface: every field is typed rather than fused into the list item's display string, and the `(unnamed)` / `unknown type` substitutions are display-only and never leak into it. Keyed on the part id rather than the filename because a filename is neither required nor unique in a MIME message |
 | inline image attachment | additionally a `PictureItem` under `#/body` when `inline` **and** `image/*` **and** a content id is set (the three conditions that make it referenceable from an HTML body), with `ImageRef{mimetype = content_type, uri = "part:" + part_id}` and `email.content_id` / `email.part_id` custom fields |
 | attachment bytes | never in the Document. `ImageRef.uri` is a pointer into the typed stream (`part:1.3`, `part:attach:1`); the bytes ride `Attachment.data` under `include_attachment_bytes`, or a child parse the coordinator drives |
 | counts and warnings | **not mapped.** `ParseStatus` closes the fold but contributes no items; a warning is stream metadata, not document structure |

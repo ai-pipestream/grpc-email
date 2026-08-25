@@ -13,6 +13,7 @@ import ai.pipestream.document.v1.ListItem;
 import ai.pipestream.document.v1.PictureItem;
 import ai.pipestream.document.v1.RefItem;
 import ai.pipestream.document.v1.SourceType;
+import ai.pipestream.document.v1.SubDocumentRef;
 import ai.pipestream.document.v1.TextItem;
 import ai.pipestream.document.v1.TextItemBase;
 import ai.pipestream.document.v1.TitleItem;
@@ -63,11 +64,13 @@ import java.util.TreeMap;
  *       blank-line-separated paragraph.
  *   <li>HTML body parts are not parsed and not mapped. Parsing HTML is the
  *       HTML collector's job; its items merge into this fragment downstream.
- *   <li>Attachment events -- which the client only gets when it asked for the
+ *   <li>Attachment events -- emitted unless the client opted out of the
  *       listing -- become a {@link GroupLabel#GROUP_LABEL_LIST} group named
- *       "attachments"; an inline image additionally becomes a
- *       {@link PictureItem} whose {@link ImageRef} points at the typed
- *       stream with a {@code part:<part_id>} URI rather than embedding bytes.
+ *       "attachments" for readers, and one {@link SubDocumentRef} in
+ *       {@code Document.attachments} for machines, keyed by the same
+ *       {@code part:<part_id>} pointer. An inline image additionally becomes
+ *       a {@link PictureItem} whose {@link ImageRef} points at the typed
+ *       stream with that URI rather than embedding bytes.
  *   <li>No provenance. Email has no pages and no boxes, so {@code prov} stays
  *       empty and source locators ride in per-item {@code custom_fields}
  *       instead of an invented page number.
@@ -347,16 +350,47 @@ public final class EmailDocumentFold {
   // --- attachments --------------------------------------------------------
 
   /**
-   * Maps one attachment event to a line in the attachments list, and -- when
-   * it is an inline image an HTML body could reference -- to a picture whose
-   * image ref points back at the typed stream.
+   * Maps one attachment event to a line in the attachments list, a typed
+   * registry entry, and -- when it is an inline image an HTML body could
+   * reference -- a picture whose image ref points back at the typed stream.
+   *
+   * <p>The list item and the registry entry are two views of one attachment,
+   * not a choice between them. The item is the readable one a person or a
+   * renderer sees; the {@link SubDocumentRef} is the machine-readable one a
+   * coordinator fans out on, and it carries every field typed rather than
+   * fused into the item's display string.
    */
   private void attachment(Attachment attachment) {
     Map<String, Value> partId = Map.of(KEY_PART_ID, string(attachment.getPartId()));
-    addListItem(attachmentsGroup(), describe(attachment), partId);
+    String itemRef = addListItem(attachmentsGroup(), describe(attachment), partId);
+    register(attachment, itemRef);
     if (isInlineImage(attachment)) {
       addPicture(attachment);
     }
+  }
+
+  /**
+   * Registers one attachment as a nested payload a downstream parser can be
+   * pointed at.
+   *
+   * <p>The id is {@code part:<part_id>}, the same pointer an inline image's
+   * {@link ImageRef} already uses and the same shape the rest of the fleet
+   * writes for its own attachments. It keys on the part id rather than the
+   * filename because a filename is neither required nor unique in a MIME
+   * message, while the part id is exactly the coordinate the typed stream
+   * addresses the bytes by.
+   *
+   * <p>An absent filename or media type stays absent. The list item's
+   * "(unnamed)" and "unknown type" are display substitutions and must not
+   * leak into a field a machine reads as a fact.
+   */
+  private void register(Attachment attachment, String itemRef) {
+    document.addAttachments(SubDocumentRef.newBuilder()
+        .setId(PART_URI_SCHEME + attachment.getPartId())
+        .setName(attachment.getFilename())
+        .setMediaType(attachment.getContentType())
+        .setSizeBytes(attachment.getSizeBytes())
+        .setItemRef(itemRef));
   }
 
   /** Lazily opens the attachments group, so a message without one has none. */

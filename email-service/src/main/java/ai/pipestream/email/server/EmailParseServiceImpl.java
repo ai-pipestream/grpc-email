@@ -308,10 +308,21 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
       cap = requested > 0 ? Math.min(maxDocumentBytes, requested) : maxDocumentBytes;
       options = new ParseOptions(
           wire.getDocumentId(),
-          wire.getListAttachments(),
+          listAttachments(wire),
           wire.getIncludeAttachmentBytes(),
           maxAttachmentBytes);
       sink = new Sink(responses, options, wire.getEmitDocument());
+    }
+
+    /**
+     * Resolves the three attachment knobs into the one question the sink
+     * asks. Listing is on unless the client opted out, and an explicit
+     * list_attachments still wins over that opt-out: a client that says both
+     * "omit" and "list" is a client whose newer field was set by a default
+     * and whose older field was set on purpose.
+     */
+    private static boolean listAttachments(ParseEmailOptions wire) {
+      return !wire.getOmitAttachmentList() || wire.getListAttachments();
     }
 
     private void onChunk(ByteString data, boolean complete) {

@@ -52,9 +52,11 @@ rpc GetServiceInfo(GetServiceInfoRequest) returns (GetServiceInfoResponse);
 **Request.** Exactly one `ParseEmailOptions` first, then `EmailChunk`
 messages in file order with `complete=true` on the last, then half-close.
 Options: `document_id`, advisory `filename` / `content_type` (recorded, never
-trusted), `list_attachments`, `include_attachment_bytes`, `max_document_mib`
-(a client may lower the server's ceiling, never raise it), `emit_document`
-(opt into the Document projection below).
+trusted), `omit_attachment_list` (attachments are listed by default; this
+suppresses the events), `list_attachments` (the historical opt-in, kept for
+older clients), `include_attachment_bytes`, `max_document_mib` (a client may
+lower the server's ceiling, never raise it), `emit_document` (opt into the
+Document projection below).
 
 **Response.** A `ParseEmailResponse` per event, `oneof event`:
 
@@ -62,7 +64,7 @@ trusted), `list_attachments`, `include_attachment_bytes`, `max_document_mib`
 |---|---|---|
 | `EmailInfo` | first, from headers alone | format, subject, role-tagged addresses, dates, message-id, in-reply-to, references, root content type, the full header list |
 | `BodyPart` | per text part, in MIME order | `part_id`, `PLAIN`/`HTML` + `content_type_raw`, UTF-8 text, declared charset, MAPI source property for `.msg` |
-| `Attachment` | per attachment, when `list_attachments` or `include_attachment_bytes` | index, filename, content type, size, content id, inline flag, optional bytes |
+| `Attachment` | per attachment, unless `omit_attachment_list` | index, filename, content type, size, content id, inline flag, optional bytes |
 | `Document` | once, immediately before the trailer, only when `emit_document` | the whole message as one `ai.pipestream.document.v1.Document` |
 | `ParseStatus` | last, exactly once | `STATE_OK` / `STATE_PARTIAL`, warnings, counts, message size |
 

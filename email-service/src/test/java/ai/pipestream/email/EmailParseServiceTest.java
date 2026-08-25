@@ -383,15 +383,60 @@ class EmailParseServiceTest {
   }
 
   @Test
-  void attachmentsAreCountedEvenWhenNotListed() throws Exception {
+  @DisplayName("default options list attachments; a message never hides what it carried")
+  void attachmentsAreListedWithoutBeingAskedFor() throws Exception {
     byte[] message = EmlFixtures.multipartWithAttachments();
     Result result = parse(message,
-        ParseEmailOptions.newBuilder().setDocumentId("eml-quiet").build(), message.length);
+        ParseEmailOptions.newBuilder().setDocumentId("eml-default").build(), message.length);
     assertThat(result.error()).isNull();
-    assertThat(result.attachments()).as("list_attachments defaults to off").isEmpty();
+    assertThat(result.attachments())
+        .as("listing is the default; no option should be needed to learn a PDF was attached")
+        .hasSize(2);
+    assertThat(result.attachments().get(0).getFilename()).isEqualTo(EmlFixtures.ATTACHMENT_NAME);
+    assertThat(result.attachments())
+        .as("bytes stay opt-in even though the listing is not")
+        .allMatch(attachment -> attachment.getData().isEmpty());
+  }
+
+  @Test
+  void attachmentsAreCountedEvenWhenTheClientOptsOutOfListing() throws Exception {
+    byte[] message = EmlFixtures.multipartWithAttachments();
+    Result result = parse(message,
+        ParseEmailOptions.newBuilder().setDocumentId("eml-quiet")
+            .setOmitAttachmentList(true).build(),
+        message.length);
+    assertThat(result.error()).isNull();
+    assertThat(result.attachments()).as("omit_attachment_list silences the events").isEmpty();
     assertThat(result.status().getAttachments())
         .as("the trailer still reports what the message carried")
         .isEqualTo(2);
+  }
+
+  @Test
+  @DisplayName("an explicit list_attachments outranks omit_attachment_list")
+  void theOlderOptInBeatsTheNewerOptOut() throws Exception {
+    byte[] message = EmlFixtures.multipartWithAttachments();
+    Result result = parse(message,
+        ParseEmailOptions.newBuilder().setDocumentId("eml-both")
+            .setOmitAttachmentList(true).setListAttachments(true).build(),
+        message.length);
+    assertThat(result.error()).isNull();
+    assertThat(result.attachments()).hasSize(2);
+  }
+
+  @Test
+  void askingForTheBytesOverridesTheOptOut() throws Exception {
+    byte[] message = EmlFixtures.multipartWithAttachments();
+    Result result = parse(message,
+        ParseEmailOptions.newBuilder().setDocumentId("eml-bytes-quiet")
+            .setOmitAttachmentList(true).setIncludeAttachmentBytes(true).build(),
+        message.length);
+    assertThat(result.error()).isNull();
+    assertThat(result.attachments())
+        .as("a client that asked for payloads asked for the listing")
+        .hasSize(2);
+    assertThat(result.attachments().get(0).getData().toByteArray())
+        .isEqualTo(EmlFixtures.ATTACHMENT_BYTES);
   }
 
   @Test

@@ -13,6 +13,7 @@ import ai.pipestream.document.v1.GroupLabel;
 import ai.pipestream.document.v1.PictureItem;
 import ai.pipestream.document.v1.RefItem;
 import ai.pipestream.document.v1.SourceType;
+import ai.pipestream.document.v1.SubDocumentRef;
 import ai.pipestream.document.v1.TextItem;
 import ai.pipestream.document.v1.TextItemBase;
 import ai.pipestream.document.v1.TitleItem;
@@ -342,6 +343,48 @@ class EmailDocumentFoldUnitTest {
   }
 
   @Test
+  @DisplayName("every attachment is registered as an addressable sub-document")
+  void attachmentsBecomeTypedSubDocumentRefs() {
+    Document document = foldFullStream();
+
+    assertThat(document.getAttachmentsCount()).isEqualTo(2);
+    SubDocumentRef order = document.getAttachments(0);
+    assertThat(order.getId()).isEqualTo("part:1.2");
+    assertThat(order.getName()).isEqualTo("order.pdf");
+    assertThat(order.getMediaType()).isEqualTo("application/pdf");
+    assertThat(order.getSizeBytes()).isEqualTo(25);
+    assertThat(order.getItemRef())
+        .as("the ref points at the list item that mentions the attachment")
+        .isEqualTo("#/texts/3");
+    assertThat(base(document.getTexts(3)).getText())
+        .isEqualTo("order.pdf (application/pdf, 25 bytes)");
+
+    SubDocumentRef seal = document.getAttachments(1);
+    assertThat(seal.getId()).isEqualTo("part:1.3");
+    assertThat(seal.getItemRef()).isEqualTo("#/texts/4");
+    assertThat(seal.getId())
+        .as("the registry and the inline picture address the same part the same way")
+        .isEqualTo(document.getPictures(0).getImage().getUri());
+  }
+
+  @Test
+  @DisplayName("display substitutions do not leak into the typed registry")
+  void anUnnamedAttachmentRegistersWithEmptyFieldsRatherThanPlaceholders() {
+    EmailDocumentFold fold = new EmailDocumentFold(VERSION);
+    fold.consume(event(attachment(0, "1.2", "", "", 12)));
+    Document document = fold.take();
+
+    assertThat(base(document.getTexts(0)).getText())
+        .as("the readable line still substitutes, because a person reads it")
+        .isEqualTo("(unnamed) (unknown type, 12 bytes)");
+    SubDocumentRef registered = document.getAttachments(0);
+    assertThat(registered.getName()).isEmpty();
+    assertThat(registered.getMediaType()).isEmpty();
+    assertThat(registered.getSizeBytes()).isEqualTo(12);
+    assertThat(registered.getId()).isEqualTo("part:1.2");
+  }
+
+  @Test
   void aMessageWithNoAttachmentEventsHasNoAttachmentsGroup() {
     EmailDocumentFold fold = new EmailDocumentFold(VERSION);
     fold.consume(event(envelope()));
@@ -350,6 +393,7 @@ class EmailDocumentFoldUnitTest {
     Document document = fold.take();
 
     assertThat(document.getGroupsList()).isEmpty();
+    assertThat(document.getAttachmentsList()).isEmpty();
     assertThat(childRefs(document.getBody())).containsExactly("#/texts/0", "#/texts/1");
   }
 
