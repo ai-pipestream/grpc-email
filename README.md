@@ -62,7 +62,7 @@ Document projection below).
 
 | Event | When | Carries |
 |---|---|---|
-| `EmailInfo` | first, from headers alone | format, subject, role-tagged addresses, dates, message-id, in-reply-to, references, root content type, the full header list |
+| `EmailInfo` | first, from headers alone | format, subject, role-tagged addresses, dates, message-id, in-reply-to (scalar plus every id), references, MAPI conversation topic and index for `.msg`, root content type, the full header list |
 | `BodyPart` | per text part, in MIME order | `part_id`, `PLAIN`/`HTML` + `content_type_raw`, UTF-8 text, declared charset, MAPI source property for `.msg` |
 | `Attachment` | per attachment, unless `omit_attachment_list` | index, filename, content type, size, content id, inline flag, optional bytes |
 | `Document` | once, immediately before the trailer, only when `emit_document` | the whole message as one `ai.pipestream.document.v1.Document` |

@@ -215,9 +215,13 @@ message EmailInfo {
   google.protobuf.Timestamp received_date = 6;
   // Message-ID with angle brackets stripped. Empty when absent.
   string message_id = 7;
-  // In-Reply-To with angle brackets stripped. Empty when absent.
+  // First In-Reply-To msg-id with angle brackets stripped, empty when
+  // absent. RFC 5322 permits more than one; read in_reply_to_ids for the
+  // whole list.
   string in_reply_to = 8;
-  // References chain, oldest first, angle brackets stripped.
+  // References chain, oldest first, angle brackets stripped. Every
+  // References header instance the message carried contributes, in order:
+  // a chain folded across two instances keeps both halves.
   repeated string references = 9;
   // Content-Type of the root part as declared, for example
   // "multipart/mixed; boundary=...". Empty when the message declared none.
@@ -226,6 +230,22 @@ message EmailInfo {
   // .msg this is the transport header block when the message kept one, and
   // is otherwise empty: MAPI properties are not invented as headers.
   repeated Header headers = 11;
+
+  // Every In-Reply-To msg-id, in header order, angle brackets stripped. A
+  // reply to a merged thread legitimately carries several; in_reply_to is
+  // the first of these.
+  repeated string in_reply_to_ids = 12;
+
+  // PidTagConversationTopic: Outlook's normalized thread subject, the
+  // subject with reply and forward prefixes removed. Empty for .eml and for
+  // a .msg that did not store it.
+  string conversation_topic = 13;
+
+  // PidTagConversationIndex as lowercase hex, verbatim. Outlook's native
+  // threading key: the first 22 bytes identify the conversation and each
+  // 5-byte suffix is one reply, so a prefix match orders a thread even when
+  // the message kept no transport headers. Empty for .eml.
+  string conversation_index = 14;
 }
 
 // The body media types this collector emits. HTML is passed through opaque

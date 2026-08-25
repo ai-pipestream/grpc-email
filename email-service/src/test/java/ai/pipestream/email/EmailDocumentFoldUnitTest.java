@@ -8,6 +8,7 @@ import ai.pipestream.document.v1.BaseTextItem;
 import ai.pipestream.document.v1.ContentLayer;
 import ai.pipestream.document.v1.DocItemLabel;
 import ai.pipestream.document.v1.Document;
+import ai.pipestream.document.v1.DocumentMeta;
 import ai.pipestream.document.v1.GroupItem;
 import ai.pipestream.document.v1.GroupLabel;
 import ai.pipestream.document.v1.PictureItem;
@@ -84,6 +85,7 @@ class EmailDocumentFoldUnitTest {
         .setReceivedDate(Timestamp.newBuilder().setSeconds(1_700_000_060L))
         .setMessageId("eml-0001@example.gov")
         .setInReplyTo("parent-0000@example.com")
+        .addInReplyToIds("parent-0000@example.com")
         .addReferences("root-0000@example.com")
         .addReferences("parent-0000@example.com")
         .setContentType("multipart/mixed; boundary=abc")
@@ -233,6 +235,79 @@ class EmailDocumentFoldUnitTest {
         .containsExactly("root-0000@example.com", "parent-0000@example.com");
     assertThat(fields.get("email.content_type").getStringValue())
         .isEqualTo("multipart/mixed; boundary=abc");
+  }
+
+  @Test
+  @DisplayName("the envelope also fills the schema's own document-metadata slot")
+  void theEnvelopeBecomesSourceMeta() {
+    Document document = foldFullStream();
+    DocumentMeta meta = document.getSourceMeta();
+
+    assertThat(document.hasSourceMeta()).isTrue();
+    assertThat(meta.getTitle()).isEqualTo("Docket 24-1183 scheduling order");
+    assertThat(meta.getCreated())
+        .as("the origination date is ISO 8601, not an epoch or a locale format")
+        .isEqualTo("2023-11-14T22:13:20Z");
+
+    Map<String, String> extra = meta.getExtraMap();
+    assertThat(extra.get("email.from")).isEqualTo("Clerk of Court <clerk@example.gov>");
+    assertThat(extra.get("email.to"))
+        .as("extra is map<string, string>, so a role's mailboxes join as the header wrote them")
+        .isEqualTo("Ada Counsel <ada@example.com>, bob@example.com");
+    assertThat(extra.get("email.cc")).isEqualTo("cc@example.com");
+    assertThat(extra.get("email.message_id")).isEqualTo("eml-0001@example.gov");
+    assertThat(extra.get("email.references"))
+        .isEqualTo("root-0000@example.com parent-0000@example.com");
+    assertThat(extra)
+        .as("a role the message did not use is an absent key")
+        .doesNotContainKey("email.bcc");
+  }
+
+  @Test
+  void threadingIdsReachSourceMetaIncludingAMultiIdInReplyTo() {
+    EmailDocumentFold fold = new EmailDocumentFold(VERSION);
+    fold.consume(event(envelope().toBuilder()
+        .clearInReplyToIds()
+        .addInReplyToIds("first@example.com")
+        .addInReplyToIds("second@example.com")
+        .build()));
+    Map<String, String> extra = fold.take().getSourceMeta().getExtraMap();
+
+    assertThat(extra.get("email.in_reply_to"))
+        .as("every id the header carried, not just the one the scalar field kept")
+        .isEqualTo("first@example.com second@example.com");
+  }
+
+  @Test
+  @DisplayName("a stored .msg threads on its conversation properties alone")
+  void conversationPropertiesReachSourceMeta() {
+    EmailDocumentFold fold = new EmailDocumentFold(VERSION);
+    fold.consume(event(EmailInfo.newBuilder()
+        .setDocumentId("filed")
+        .setFormat(EmailFormat.EMAIL_FORMAT_MSG)
+        .setSubject("RE: Docket 24-1183")
+        .setConversationTopic("Docket 24-1183")
+        .setConversationIndex("01d9f7a2b3c4d5e6f70809")
+        .build()));
+    Map<String, String> extra = fold.take().getSourceMeta().getExtraMap();
+
+    assertThat(extra.get("email.conversation_topic")).isEqualTo("Docket 24-1183");
+    assertThat(extra.get("email.conversation_index")).isEqualTo("01d9f7a2b3c4d5e6f70809");
+    assertThat(extra)
+        .as("a message with no transport headers still gets threading, and invents no msg-id")
+        .doesNotContainKey("email.message_id");
+  }
+
+  @Test
+  void aMessageWithNoEnvelopeFactsHasNoSourceMeta() {
+    EmailDocumentFold fold = new EmailDocumentFold(VERSION);
+    fold.consume(event(EmailInfo.newBuilder()
+        .setDocumentId("bare")
+        .setFormat(EmailFormat.EMAIL_FORMAT_MSG)
+        .build()));
+    assertThat(fold.take().hasSourceMeta())
+        .as("an empty metadata block is worse than none; a consumer cannot tell it apart")
+        .isFalse();
   }
 
   @Test

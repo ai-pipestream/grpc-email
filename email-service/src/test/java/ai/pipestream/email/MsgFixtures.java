@@ -36,6 +36,8 @@ final class MsgFixtures {
   private static final int PID_RTF_COMPRESSED = 0x1009;
   private static final int PID_BODY_HTML = 0x1013;
   private static final int PID_INTERNET_MESSAGE_ID = 0x1035;
+  private static final int PID_CONVERSATION_TOPIC = 0x0070;
+  private static final int PID_CONVERSATION_INDEX = 0x0071;
   private static final int PID_RECIPIENT_TYPE = 0x0C15;
   private static final int PID_DISPLAY_NAME = 0x3001;
   private static final int PID_EMAIL_ADDRESS = 0x3003;
@@ -72,6 +74,12 @@ final class MsgFixtures {
   static final byte[] ATTACHMENT_BYTES =
       "%PDF-1.4 not really a pdf".getBytes(StandardCharsets.US_ASCII);
   static final String INLINE_CONTENT_ID = "seal@example.gov";
+  static final String CONVERSATION_TOPIC = "Docket 24-1183 scheduling order";
+  /** A 22-byte conversation header plus one 5-byte reply block. */
+  static final byte[] CONVERSATION_INDEX = {
+      1, (byte) 0xD9, (byte) 0xF7, (byte) 0xA2, (byte) 0xB3, (byte) 0xC4, (byte) 0xD5,
+      (byte) 0xE6, (byte) 0xF7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+      (byte) 0xAA, (byte) 0xBB, (byte) 0xCC, (byte) 0xDD, (byte) 0xEE};
   static final long SUBMIT_TIME_MILLIS = 1_700_000_000_000L;
   static final long DELIVERY_TIME_MILLIS = 1_700_000_060_000L;
 
@@ -114,6 +122,29 @@ final class MsgFixtures {
       root.createDocument(PROPERTIES_STREAM,
           new ByteArrayInputStream(messageProperties(3, 2, properties)));
 
+      container.writeFilesystem(out);
+      return out.toByteArray();
+    }
+  }
+
+  /**
+   * A message filed straight out of a mailbox: no transport header block at
+   * all, so its only threading is the pair of MAPI conversation properties.
+   * This is the common shape, and the one that used to thread on nothing.
+   */
+  static byte[] conversationOnly() throws IOException {
+    try (POIFSFileSystem container = new POIFSFileSystem();
+         ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+      DirectoryEntry root = container.getRoot();
+      unicode(root, PID_SUBJECT, "RE: " + CONVERSATION_TOPIC);
+      unicode(root, PID_SENDER_NAME, SENDER_NAME);
+      unicode(root, PID_SENDER_EMAIL_ADDRESS, SENDER_EMAIL);
+      unicode(root, PID_BODY, PLAIN_BODY);
+      unicode(root, PID_CONVERSATION_TOPIC, CONVERSATION_TOPIC);
+      binary(root, PID_CONVERSATION_INDEX, CONVERSATION_INDEX);
+      recipient(root, 0, TO_NAME, TO_EMAIL, RECIPIENT_TO);
+      root.createDocument(PROPERTIES_STREAM,
+          new ByteArrayInputStream(messageProperties(1, 0, List.of())));
       container.writeFilesystem(out);
       return out.toByteArray();
     }

@@ -13,6 +13,7 @@ import ai.pipestream.email.v1.EmailInfo;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.List;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -109,6 +110,69 @@ class HeaderProjectionUnitTest {
             tuple("", "frank@example.com"));
     assertThat(HeaderProjection.parseAddressList(null, AddressRole.ADDRESS_ROLE_TO)).isEmpty();
     assertThat(HeaderProjection.parseAddressList("  ", AddressRole.ADDRESS_ROLE_TO)).isEmpty();
+  }
+
+  @Test
+  void aMultiIdInReplyToIsSplitRatherThanMangled() {
+    EmailInfo info = project("""
+        From: a@example.com\r
+        In-Reply-To: <first@example.com> <second@example.com>\r
+        \r
+        """);
+
+    assertThat(info.getInReplyToIdsList())
+        .as("RFC 5322 allows more than one msg-id here; each is its own id")
+        .containsExactly("first@example.com", "second@example.com");
+    assertThat(info.getInReplyTo())
+        .as("the scalar stays the first id, which is what a single-id message always meant")
+        .isEqualTo("first@example.com");
+    assertThat(info.getInReplyTo())
+        .as("stripping the outer brackets of the whole value produced this garbage id")
+        .isNotEqualTo("first@example.com> <second@example.com");
+  }
+
+  @Test
+  void aSingleIdInReplyToKeepsItsOldMeaning() {
+    EmailInfo info = project("From: a@example.com\r\nIn-Reply-To: <only@example.com>\r\n\r\n");
+    assertThat(info.getInReplyTo()).isEqualTo("only@example.com");
+    assertThat(info.getInReplyToIdsList()).containsExactly("only@example.com");
+  }
+
+  @Test
+  @DisplayName("a References chain folded across two header instances keeps both halves")
+  void everyReferencesInstanceIsRead() {
+    EmailInfo info = project("""
+        From: a@example.com\r
+        References: <root@example.com> <mid-1@example.com>\r
+        Subject: split chain\r
+        References: <mid-2@example.com>\r
+        \r
+        """);
+
+    assertThat(info.getReferencesList())
+        .as("reading only the first instance loses the newer half of the thread")
+        .containsExactly("root@example.com", "mid-1@example.com", "mid-2@example.com");
+  }
+
+  @Test
+  void msgIdsReadsEveryShapeAMailerWrites() {
+    assertThat(HeaderProjection.msgIds("<a@x> <b@x>")).containsExactly("a@x", "b@x");
+    assertThat(HeaderProjection.msgIds("<a@x>,<b@x>"))
+        .as("some agents separate with commas")
+        .containsExactly("a@x", "b@x");
+    assertThat(HeaderProjection.msgIds("bare@x"))
+        .as("a value with no brackets is still an id")
+        .containsExactly("bare@x");
+    assertThat(HeaderProjection.msgIds("bare-one@x bare-two@x"))
+        .containsExactly("bare-one@x", "bare-two@x");
+    assertThat(HeaderProjection.msgIds("<a@x>\r\n <b@x>"))
+        .as("a folded chain unfolds first")
+        .containsExactly("a@x", "b@x");
+    assertThat(HeaderProjection.msgIds("<>")).isEmpty();
+    assertThat(HeaderProjection.msgIds("", "  ", (String) null)).isEmpty();
+    assertThat(HeaderProjection.msgIds("<a@x>", "<b@x>"))
+        .as("several header instances read in order")
+        .containsExactly("a@x", "b@x");
   }
 
   @Test

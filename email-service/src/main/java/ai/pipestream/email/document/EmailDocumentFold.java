@@ -5,6 +5,7 @@ import ai.pipestream.document.v1.CollectorSource;
 import ai.pipestream.document.v1.ContentLayer;
 import ai.pipestream.document.v1.DocItemLabel;
 import ai.pipestream.document.v1.Document;
+import ai.pipestream.document.v1.DocumentMeta;
 import ai.pipestream.document.v1.DocumentOrigin;
 import ai.pipestream.document.v1.GroupItem;
 import ai.pipestream.document.v1.GroupLabel;
@@ -53,9 +54,11 @@ import java.util.TreeMap;
  * <p>What is mapped, and what deliberately is not:
  *
  * <ul>
- *   <li>The envelope becomes the document name, its origin, and typed
- *       key/values in the body group's {@code meta.custom_fields} under
- *       {@code email.*} keys. Only envelope facts go there; the lossless
+ *   <li>The envelope becomes the document name, its origin, typed key/values
+ *       in the body group's {@code meta.custom_fields} under {@code email.*}
+ *       keys, and {@code source_meta}: the subject as the title, the
+ *       origination date as {@code created}, and the addresses and threading
+ *       ids in {@code extra}. Only envelope facts go there; the lossless
  *       header list stays on {@link EmailInfo}, because a Document is not a
  *       place to dump headers.
  *   <li>The subject additionally becomes a {@link TitleItem}, the first body
@@ -114,6 +117,18 @@ public final class EmailDocumentFold {
   private static final String ATTACHMENTS_GROUP_NAME = "attachments";
   private static final String KEY_PART_ID = "email.part_id";
   private static final String KEY_CONTENT_ID = "email.content_id";
+  private static final String KEY_MESSAGE_ID = "email.message_id";
+  private static final String KEY_IN_REPLY_TO = "email.in_reply_to";
+  private static final String KEY_REFERENCES = "email.references";
+  private static final String KEY_CONVERSATION_TOPIC = "email.conversation_topic";
+  private static final String KEY_CONVERSATION_INDEX = "email.conversation_index";
+
+  /**
+   * Joins rendered mailboxes in a DocumentMeta.extra value. Comma-space is
+   * the RFC 822 address-list separator, so an extra value reads back as the
+   * header it came from; the typed per-mailbox list stays on the body group.
+   */
+  private static final String ADDRESS_SEPARATOR = ", ";
 
   private final String version;
   private final Document.Builder document = Document.newBuilder();
@@ -212,9 +227,72 @@ public final class EmailDocumentFold {
     if (!facts.isEmpty()) {
       document.getBodyBuilder().getMetaBuilder().putAllCustomFields(facts);
     }
+    sourceMeta(info);
 
     if (!info.getSubject().isEmpty()) {
       addTitle(BODY_REF, info.getSubject());
+    }
+  }
+
+  /**
+   * The envelope again, in the schema's own document-metadata slot.
+   *
+   * <p>{@code source_meta} is the cross-collector shape: a consumer that
+   * wants "who wrote this and when" reads the same three fields whether the
+   * source was a message, a book, or a spreadsheet, instead of learning one
+   * collector's custom-field vocabulary. So the subject is the title and the
+   * origination date is {@code created}, and the facts that have no
+   * first-class slot ride {@code extra} under the same {@code email.} keys
+   * the body group already uses.
+   *
+   * <p>{@code extra} is {@code map<string, string>}, so the per-role address
+   * lists are joined for it; the body group's {@code custom_fields} keep the
+   * same values as real {@code ListValue}s, and remain the place to read one
+   * mailbox at a time.
+   *
+   * <p>Threading goes here in full: the message id, every In-Reply-To id, the
+   * References chain, and for a stored Outlook message the conversation topic
+   * and index, which are frequently the only threading it kept.
+   */
+  private void sourceMeta(EmailInfo info) {
+    DocumentMeta.Builder meta = DocumentMeta.newBuilder();
+    if (!info.getSubject().isEmpty()) {
+      meta.setTitle(info.getSubject());
+    }
+    if (info.hasDate()) {
+      meta.setCreated(rfc3339(info.getDate()));
+    }
+
+    Map<AddressRole, List<String>> byRole = new LinkedHashMap<>();
+    for (Address address : info.getAddressesList()) {
+      String rendered = render(address);
+      if (!rendered.isEmpty()) {
+        byRole.computeIfAbsent(address.getRole(), role -> new ArrayList<>()).add(rendered);
+      }
+    }
+    for (AddressRole role : List.of(
+        AddressRole.ADDRESS_ROLE_FROM, AddressRole.ADDRESS_ROLE_TO, AddressRole.ADDRESS_ROLE_CC)) {
+      List<String> rendered = byRole.get(role);
+      if (rendered != null && !rendered.isEmpty()) {
+        meta.putExtra(key(role), String.join(ADDRESS_SEPARATOR, rendered));
+      }
+    }
+
+    putIfPresent(meta, KEY_MESSAGE_ID, info.getMessageId());
+    putIfPresent(meta, KEY_IN_REPLY_TO, String.join(" ", info.getInReplyToIdsList()));
+    putIfPresent(meta, KEY_REFERENCES, String.join(" ", info.getReferencesList()));
+    putIfPresent(meta, KEY_CONVERSATION_TOPIC, info.getConversationTopic());
+    putIfPresent(meta, KEY_CONVERSATION_INDEX, info.getConversationIndex());
+
+    if (!meta.getExtraMap().isEmpty() || meta.hasTitle() || meta.hasCreated()) {
+      document.setSourceMeta(meta);
+    }
+  }
+
+  /** Records an extra key, or nothing at all when the message had no value. */
+  private static void putIfPresent(DocumentMeta.Builder meta, String key, String value) {
+    if (!value.isEmpty()) {
+      meta.putExtra(key, value);
     }
   }
 
@@ -252,13 +330,13 @@ public final class EmailDocumentFold {
       facts.put("email.received_date", string(rfc3339(info.getReceivedDate())));
     }
     if (!info.getMessageId().isEmpty()) {
-      facts.put("email.message_id", string(info.getMessageId()));
+      facts.put(KEY_MESSAGE_ID, string(info.getMessageId()));
     }
     if (!info.getInReplyTo().isEmpty()) {
-      facts.put("email.in_reply_to", string(info.getInReplyTo()));
+      facts.put(KEY_IN_REPLY_TO, string(info.getInReplyTo()));
     }
     if (info.getReferencesCount() > 0) {
-      facts.put("email.references",
+      facts.put(KEY_REFERENCES,
           list(info.getReferencesList().stream().map(EmailDocumentFold::string).toList()));
     }
     if (!info.getContentType().isEmpty()) {

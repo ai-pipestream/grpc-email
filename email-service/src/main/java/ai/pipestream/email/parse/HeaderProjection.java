@@ -63,13 +63,15 @@ public final class HeaderProjection {
     }
 
     info.setMessageId(stripAngles(first(headers, "Message-ID")));
-    info.setInReplyTo(stripAngles(first(headers, "In-Reply-To")));
-    for (String reference : first(headers, "References").split("\\s+")) {
-      String trimmed = stripAngles(reference);
-      if (!trimmed.isEmpty()) {
-        info.addReferences(trimmed);
-      }
+    List<String> inReplyTo = msgIds(first(headers, "In-Reply-To"));
+    info.addAllInReplyToIds(inReplyTo);
+    if (!inReplyTo.isEmpty()) {
+      info.setInReplyTo(inReplyTo.getFirst());
     }
+    // Every References instance, not just the first: a long chain is
+    // routinely folded across two header lines, and reading one of them
+    // silently loses the older half of the thread.
+    info.addAllReferences(msgIds(all(headers, "References")));
     info.setContentType(first(headers, "Content-Type").trim());
 
     Enumeration<jakarta.mail.Header> all = headers.getAllHeaders();
@@ -99,6 +101,54 @@ public final class HeaderProjection {
         .setSeconds(Math.floorDiv(epochMillis, 1000L))
         .setNanos((int) Math.floorMod(epochMillis, 1000L) * 1_000_000)
         .build();
+  }
+
+  /**
+   * Splits a msg-id-list header value into its ids, angle brackets stripped.
+   *
+   * <p>Stripping the outer brackets off the whole value is the trap this
+   * exists to avoid: In-Reply-To and References are both {@code 1*msg-id} in
+   * RFC 5322, so {@code "<a@x> <b@x>"} treated as one id becomes the single
+   * malformed {@code "a@x> <b@x"} and the thread link is lost. Bracketed ids
+   * are read as ids wherever they appear, which also tolerates the comma
+   * separators some agents emit; a value with no brackets at all is split on
+   * whitespace instead, so a bare id still survives.
+   *
+   * @param value one or more raw header values, each unfolded
+   * @return the ids in the order they were written, without empties
+   */
+  public static List<String> msgIds(String... value) {
+    List<String> ids = new ArrayList<>();
+    for (String raw : value) {
+      if (raw == null || raw.isBlank()) {
+        continue;
+      }
+      String unfolded = MimeUtility.unfold(raw);
+      int cursor = 0;
+      boolean bracketed = false;
+      while (true) {
+        int open = unfolded.indexOf('<', cursor);
+        int close = open < 0 ? -1 : unfolded.indexOf('>', open + 1);
+        if (close < 0) {
+          break;
+        }
+        bracketed = true;
+        String id = unfolded.substring(open + 1, close).trim();
+        if (!id.isEmpty()) {
+          ids.add(id);
+        }
+        cursor = close + 1;
+      }
+      if (bracketed) {
+        continue;
+      }
+      for (String bare : unfolded.trim().split("[\\s,]+")) {
+        if (!bare.isEmpty()) {
+          ids.add(bare);
+        }
+      }
+    }
+    return ids;
   }
 
   /** Strips the angle brackets RFC 822 wraps msg-ids in. */
@@ -165,6 +215,12 @@ public final class HeaderProjection {
   private static String first(InternetHeaders headers, String field) {
     String[] values = headers.getHeader(field);
     return values == null || values.length == 0 || values[0] == null ? "" : values[0];
+  }
+
+  /** Every instance of a repeatable header, in the order it was written. */
+  private static String[] all(InternetHeaders headers, String field) {
+    String[] values = headers.getHeader(field);
+    return values == null ? new String[0] : values;
   }
 
   private static Timestamp parseDate(String value) {

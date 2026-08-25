@@ -19,6 +19,7 @@ import java.util.Map;
 import org.apache.poi.hsmf.MAPIMessage;
 import org.apache.poi.hsmf.datatypes.AttachmentChunks;
 import org.apache.poi.hsmf.datatypes.ByteChunk;
+import org.apache.poi.hsmf.datatypes.Chunk;
 import org.apache.poi.hsmf.datatypes.Chunks;
 import org.apache.poi.hsmf.datatypes.MAPIProperty;
 import org.apache.poi.hsmf.datatypes.PropertiesChunk;
@@ -144,6 +145,13 @@ public final class MsgParser {
       info.setReceivedDate(delivered);
     }
 
+    // Outlook's own threading primitives, read before the transport block
+    // because they are the only ones a stored .msg is guaranteed to keep.
+    // A message filed out of a mailbox usually has no transport headers at
+    // all, and without these it would have no threading whatsoever.
+    info.setConversationTopic(text(chunks.getConversationTopic()));
+    info.setConversationIndex(hex(binary(chunks, MAPIProperty.CONVERSATION_INDEX)));
+
     // Transport headers are the only place a .msg keeps genuine RFC 822
     // headers. MAPI properties are not dressed up as headers here: an
     // invented Received line would be a lie about provenance.
@@ -152,6 +160,40 @@ public final class MsgParser {
       applyTransportHeaders(transport, info, sink);
     }
     return info.build();
+  }
+
+  /**
+   * One binary MAPI property, or an empty array when the message had none.
+   * Read from the chunk map rather than the property stream: a PT_BINARY
+   * property lives in its own stream and only its pointer sits among the
+   * fixed-length entries.
+   */
+  private static byte[] binary(Chunks chunks, MAPIProperty property) {
+    Map<MAPIProperty, List<Chunk>> all = chunks.getAll();
+    List<Chunk> found = all == null ? null : all.get(property);
+    if (found == null) {
+      return new byte[0];
+    }
+    for (Chunk chunk : found) {
+      if (chunk instanceof ByteChunk bytes && bytes.getValue() != null) {
+        return bytes.getValue();
+      }
+    }
+    return new byte[0];
+  }
+
+  /**
+   * Lowercase hex of a binary property. PidTagConversationIndex is a packed
+   * structure, not text, and its prefix ordering is what makes it useful, so
+   * it is carried verbatim rather than decoded into fields this service has
+   * no slot for.
+   */
+  private static String hex(byte[] value) {
+    StringBuilder hex = new StringBuilder(value.length * 2);
+    for (byte b : value) {
+      hex.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
+    }
+    return hex.toString();
   }
 
   private static void applyTransportHeaders(
@@ -173,8 +215,12 @@ public final class MsgParser {
               .setValue(HeaderProjection.decoded(header.getValue()))
               .build());
     }
-    if (info.getInReplyTo().isEmpty()) {
-      info.setInReplyTo(HeaderProjection.stripAngles(headerValue(headers, "In-Reply-To")));
+    if (info.getInReplyToIdsCount() == 0) {
+      List<String> inReplyTo = HeaderProjection.msgIds(headerValue(headers, "In-Reply-To"));
+      info.addAllInReplyToIds(inReplyTo);
+      if (!inReplyTo.isEmpty()) {
+        info.setInReplyTo(inReplyTo.getFirst());
+      }
     }
     if (info.getContentType().isEmpty()) {
       info.setContentType(headerValue(headers, "Content-Type").trim());
@@ -183,18 +229,18 @@ public final class MsgParser {
       info.setMessageId(HeaderProjection.stripAngles(headerValue(headers, "Message-ID")));
     }
     if (info.getReferencesCount() == 0) {
-      for (String reference : headerValue(headers, "References").split("\\s+")) {
-        String stripped = HeaderProjection.stripAngles(reference);
-        if (!stripped.isEmpty()) {
-          info.addReferences(stripped);
-        }
-      }
+      info.addAllReferences(HeaderProjection.msgIds(headerValues(headers, "References")));
     }
   }
 
   private static String headerValue(InternetHeaders headers, String name) {
     String[] values = headers.getHeader(name);
     return values == null || values.length == 0 || values[0] == null ? "" : values[0];
+  }
+
+  private static String[] headerValues(InternetHeaders headers, String name) {
+    String[] values = headers.getHeader(name);
+    return values == null ? new String[0] : values;
   }
 
   private static void bodies(MAPIMessage message, ParseSink sink) {

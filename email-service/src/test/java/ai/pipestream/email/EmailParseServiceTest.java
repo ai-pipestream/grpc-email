@@ -465,6 +465,35 @@ class EmailParseServiceTest {
   // --- .msg ---------------------------------------------------------------
 
   @Test
+  @DisplayName("a filed .msg with no transport headers still threads")
+  void outlookConversationPropertiesCarryThreading() throws Exception {
+    Result result = parseWhole(MsgFixtures.conversationOnly(), "msg-conversation");
+    EmailInfo info = result.info();
+
+    assertThat(info.getHeadersList())
+        .as("this fixture kept no transport header block at all")
+        .isEmpty();
+    assertThat(info.getMessageId())
+        .as("no header block means no msg-id, and none is invented")
+        .isEmpty();
+    assertThat(info.getConversationTopic())
+        .as("PidTagConversationTopic is the normalized thread subject")
+        .isEqualTo(MsgFixtures.CONVERSATION_TOPIC);
+    assertThat(info.getConversationIndex())
+        .as("PidTagConversationIndex rides as lowercase hex, verbatim")
+        .isEqualTo(hex(MsgFixtures.CONVERSATION_INDEX));
+  }
+
+  /** The expected hex of a fixture's binary property, computed independently. */
+  private static String hex(byte[] value) {
+    StringBuilder text = new StringBuilder();
+    for (byte b : value) {
+      text.append(String.format("%02x", b));
+    }
+    return text.toString();
+  }
+
+  @Test
   void outlookMsgRoundTrip() throws Exception {
     Result result = parseWhole(MsgFixtures.full(), "msg-1");
     EmailInfo info = result.info();
