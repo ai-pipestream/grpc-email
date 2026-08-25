@@ -494,6 +494,52 @@ class EmailParseServiceTest {
   }
 
   @Test
+  @DisplayName("an embedded Outlook message is handed over as bytes, not lost")
+  void embeddedOutlookMessageIsRecoverable() throws Exception {
+    Result result = parse(MsgFixtures.embeddedMessage(),
+        ParseEmailOptions.newBuilder().setDocumentId("msg-embedded")
+            .setIncludeAttachmentBytes(true).build(),
+        Integer.MAX_VALUE);
+    assertThat(result.error()).isNull();
+    assertThat(result.attachments()).hasSize(1);
+
+    Attachment embedded = result.attachments().get(0);
+    assertThat(embedded.getFilename()).isEqualTo(MsgFixtures.EMBEDDED_ATTACHMENT_NAME);
+    assertThat(embedded.getContentType())
+        .as("a nested storage with no mime tag is still an Outlook message")
+        .isEqualTo("application/vnd.ms-outlook");
+    assertThat(embedded.getSizeBytes())
+        .as("a directory-stored payload used to report size 0")
+        .isPositive();
+    assertThat(embedded.getData().isEmpty())
+        .as("and used to carry no bytes at all")
+        .isFalse();
+    assertThat(result.status().getAttachmentBytes()).isEqualTo(embedded.getSizeBytes());
+
+    // The point of the fix: what comes out is a real .msg, so the coordinator
+    // can feed it straight back in. Parsing it recovers the nested envelope.
+    Result reparsed = parseWhole(embedded.getData().toByteArray(), "msg-embedded-child");
+    assertThat(reparsed.info().getFormat()).isEqualTo(EmailFormat.EMAIL_FORMAT_MSG);
+    assertThat(reparsed.info().getSubject()).isEqualTo(MsgFixtures.EMBEDDED_SUBJECT);
+    assertThat(reparsed.bodies()).hasSize(1);
+    assertThat(reparsed.bodies().get(0).getText()).isEqualTo(MsgFixtures.EMBEDDED_BODY);
+  }
+
+  @Test
+  void anEmbeddedMessageIsStillReportedWhenItsBytesAreNotRequested() throws Exception {
+    Result result = parseWhole(MsgFixtures.embeddedMessage(), "msg-embedded-quiet");
+    Attachment embedded = result.attachments().get(0);
+
+    assertThat(embedded.getSizeBytes())
+        .as("the true size is reported whether or not the payload rides along")
+        .isPositive();
+    assertThat(embedded.getData().isEmpty()).isTrue();
+    assertThat(result.status().getWarningsList())
+        .as("the degradation is named: described here, reparsed by the coordinator")
+        .anyMatch(warning -> warning.contains("embedded Outlook message"));
+  }
+
+  @Test
   void outlookMsgRoundTrip() throws Exception {
     Result result = parseWhole(MsgFixtures.full(), "msg-1");
     EmailInfo info = result.info();

@@ -52,6 +52,8 @@ final class MsgFixtures {
   private static final int TYPE_TIME = 0x0040;
   private static final int TYPE_BINARY = 0x0102;
   private static final int TYPE_UNICODE = 0x001F;
+  /** PT_OBJECT: the value is a nested storage directory, not a stream. */
+  private static final int TYPE_DIRECTORY = 0x000D;
 
   /** PidTagRecipientType values. */
   static final int RECIPIENT_TO = 1;
@@ -162,6 +164,49 @@ final class MsgFixtures {
       recipient(root, 0, TO_NAME, TO_EMAIL, RECIPIENT_TO);
       root.createDocument(PROPERTIES_STREAM,
           new ByteArrayInputStream(messageProperties(1, 0, List.of())));
+      container.writeFilesystem(out);
+      return out.toByteArray();
+    }
+  }
+
+  static final String EMBEDDED_SUBJECT = "Fwd: original complaint";
+  static final String EMBEDDED_BODY = "Forwarding the original filing.";
+  static final String EMBEDDED_ATTACHMENT_NAME = "complaint.msg";
+
+  /**
+   * A message carrying an embedded Outlook message, stored the way Outlook
+   * actually stores one: a PT_OBJECT directory under the attachment storage
+   * rather than a PidTagAttachDataBinary stream. There is no byte chunk at
+   * all here, which is what used to make the nested message unrecoverable.
+   */
+  static byte[] embeddedMessage() throws IOException {
+    try (POIFSFileSystem container = new POIFSFileSystem();
+         ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+      DirectoryEntry root = container.getRoot();
+      unicode(root, PID_SUBJECT, "Please see attached");
+      unicode(root, PID_SENDER_NAME, SENDER_NAME);
+      unicode(root, PID_SENDER_EMAIL_ADDRESS, SENDER_EMAIL);
+      unicode(root, PID_BODY, PLAIN_BODY);
+      recipient(root, 0, TO_NAME, TO_EMAIL, RECIPIENT_TO);
+
+      DirectoryEntry storage =
+          root.createDirectory(String.format("__attach_version1.0_#%08X", 0));
+      unicode(storage, PID_ATTACH_FILENAME, EMBEDDED_ATTACHMENT_NAME);
+      unicode(storage, PID_ATTACH_LONG_FILENAME, EMBEDDED_ATTACHMENT_NAME);
+      // No PID_ATTACH_DATA stream: the payload is the nested storage below.
+      DirectoryEntry embedded =
+          storage.createDirectory(chunkName(PID_ATTACH_DATA, TYPE_DIRECTORY));
+      unicode(embedded, PID_SUBJECT, EMBEDDED_SUBJECT);
+      unicode(embedded, PID_SENDER_NAME, TO_NAME);
+      unicode(embedded, PID_SENDER_EMAIL_ADDRESS, TO_EMAIL);
+      unicode(embedded, PID_BODY, EMBEDDED_BODY);
+      embedded.createDocument(PROPERTIES_STREAM,
+          new ByteArrayInputStream(storageProperties(List.of())));
+      storage.createDocument(PROPERTIES_STREAM,
+          new ByteArrayInputStream(storageProperties(List.of())));
+
+      root.createDocument(PROPERTIES_STREAM,
+          new ByteArrayInputStream(messageProperties(1, 1, List.of())));
       container.writeFilesystem(out);
       return out.toByteArray();
     }

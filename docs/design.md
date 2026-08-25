@@ -16,6 +16,8 @@
 ## 2. Non-goals (v1)
 
 - Sending mail, IMAP/POP, or PST/OST stores (those are connectors).
+- Expanding an embedded message in place. Its bytes are handed over
+  whole, as a standalone `.msg`, for the coordinator to re-parse.
 - Rendering `.msg` through LibreOffice.
 - Embedding attachment bytes in the `Document` by default.
 - Decrypting S/MIME or verifying DKIM (headers are preserved; crypto is

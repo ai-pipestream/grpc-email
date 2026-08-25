@@ -139,10 +139,14 @@ an invented page number.
   best-effort plain text with a `STATE_PARTIAL` warning, since v1 ships no
   RTF layout engine. Transport headers are surfaced when the message kept
   them; MAPI properties are never dressed up as headers they are not.
+  Outlook stores an embedded message as a nested storage directory rather
+  than a byte stream, so that directory is repacked into a standalone `.msg`
+  and emitted as the attachment's payload: the nested message is deferred to
+  the coordinator, not destroyed.
 
 Out of scope for v1: sending mail, IMAP/POP, PST/OST, S/MIME decryption, DKIM
-verification, expanding embedded `message/rfc822` and Outlook attachments
-(they are described so the coordinator can re-parse them).
+verification, expanding embedded `message/rfc822` and Outlook attachments in
+place (their bytes are handed over so the coordinator can re-parse them).
 
 ## Configuration
 

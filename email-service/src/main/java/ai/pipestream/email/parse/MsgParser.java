@@ -11,6 +11,7 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
 import jakarta.mail.internet.InternetHeaders;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Calendar;
@@ -21,6 +22,7 @@ import org.apache.poi.hsmf.datatypes.AttachmentChunks;
 import org.apache.poi.hsmf.datatypes.ByteChunk;
 import org.apache.poi.hsmf.datatypes.Chunk;
 import org.apache.poi.hsmf.datatypes.Chunks;
+import org.apache.poi.hsmf.datatypes.DirectoryChunk;
 import org.apache.poi.hsmf.datatypes.MAPIProperty;
 import org.apache.poi.hsmf.datatypes.PropertiesChunk;
 import org.apache.poi.hsmf.datatypes.PropertyValue;
@@ -28,6 +30,7 @@ import org.apache.poi.hsmf.datatypes.RecipientChunks;
 import org.apache.poi.hsmf.datatypes.StringChunk;
 import org.apache.poi.poifs.filesystem.DirectoryNode;
 import org.apache.poi.poifs.filesystem.Entry;
+import org.apache.poi.poifs.filesystem.EntryUtils;
 import org.apache.poi.poifs.filesystem.POIFSFileSystem;
 
 /**
@@ -40,6 +43,9 @@ import org.apache.poi.poifs.filesystem.POIFSFileSystem;
  * once the container is open, still ahead of the bodies and attachments.
  */
 public final class MsgParser {
+
+  /** Media type of an embedded Outlook message, matching the .msg container. */
+  private static final String EMBEDDED_MESSAGE_MIMETYPE = "application/vnd.ms-outlook";
 
   /** MAPI PidTagRecipientType values, per MS-OXOMSG. */
   private static final int RECIPIENT_TYPE_FROM = 0;
@@ -300,12 +306,13 @@ public final class MsgParser {
       String filename = firstNonEmpty(
           text(chunk.getAttachLongFileName()), text(chunk.getAttachFileName()));
       String contentId = HeaderProjection.stripAngles(text(chunk.getAttachContentId()));
-      byte[] payload = payload(chunk);
+      byte[] payload = payload(chunk, index, sink);
       String contentType = text(chunk.getAttachMimeTag());
       if (chunk.getAttachmentDirectory() != null) {
-        contentType = firstNonEmpty(contentType, "application/vnd.ms-outlook");
+        contentType = firstNonEmpty(contentType, EMBEDDED_MESSAGE_MIMETYPE);
         sink.warn("attachment " + index
-            + " is an embedded Outlook message; described but not expanded in v1");
+            + " is an embedded Outlook message; emitted as .msg bytes for the coordinator"
+            + " to reparse rather than expanded here");
       }
       if (filename.isEmpty()) {
         sink.warn("attachment " + index + " has no filename");
@@ -330,12 +337,45 @@ public final class MsgParser {
     }
   }
 
-  private static byte[] payload(AttachmentChunks chunk) {
+  /**
+   * The attachment's bytes, from whichever of the two MAPI storage forms the
+   * producer used.
+   *
+   * <p>An ordinary attachment keeps its payload in the PidTagAttachDataBinary
+   * chunk and reading it is one call. An embedded message keeps it in
+   * PidTagAttachDataObject: a whole nested storage directory, for which
+   * {@code getAttachData()} returns nothing at all. Reading only the byte
+   * chunk therefore reported every embedded message as size 0 with no
+   * payload, which does not defer the nested message so much as destroy it:
+   * no coordinator can reparse what it was never given. Forwarded-mail
+   * chains, the common shape in support and legal mailboxes, are exactly what
+   * was being lost.
+   *
+   * <p>POI hands back the nested storage as a directory node, so it is
+   * written out as a standalone OLE2 container: a real .msg the coordinator
+   * can feed straight back into this same service.
+   */
+  private static byte[] payload(AttachmentChunks chunk, int index, ParseSink sink) {
     ByteChunk data = chunk.getAttachData();
-    if (data == null || data.getValue() == null) {
+    if (data != null && data.getValue() != null) {
+      return data.getValue();
+    }
+    DirectoryChunk directory = chunk.getAttachmentDirectory();
+    if (directory == null || directory.getDirectory() == null) {
       return new byte[0];
     }
-    return data.getValue();
+    try (POIFSFileSystem nested = new POIFSFileSystem();
+         ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+      EntryUtils.copyNodes(directory.getDirectory(), nested.getRoot());
+      nested.writeFilesystem(out);
+      return out.toByteArray();
+    } catch (IOException | RuntimeException unwritable) {
+      // A nested storage that will not round-trip is a degraded attachment,
+      // not a failed parse: the rest of the message is still good.
+      sink.warn("attachment " + index + " is an embedded Outlook message whose storage could"
+          + " not be repacked: " + unwritable.getMessage());
+      return new byte[0];
+    }
   }
 
   private static RecipientChunks[] recipients(MAPIMessage message) {
