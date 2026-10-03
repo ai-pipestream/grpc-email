@@ -230,6 +230,25 @@ final class EmlFixtures {
     return message.toString().getBytes(StandardCharsets.US_ASCII);
   }
 
+  /** A text body followed by {@code count} small named attachments. */
+  static byte[] manyAttachments(int count) throws Exception {
+    MimeMessage message = envelope();
+    MimeMultipart mixed = new MimeMultipart("mixed");
+    MimeBodyPart body = new MimeBodyPart();
+    body.setText(PLAIN_BODY, "UTF-8");
+    mixed.addBodyPart(body);
+    for (int index = 0; index < count; index++) {
+      MimeBodyPart attachment = new MimeBodyPart();
+      attachment.setDataHandler(new DataHandler(
+          new ByteArrayDataSource(ATTACHMENT_BYTES, "application/pdf")));
+      attachment.setFileName("exhibit-" + index + ".pdf");
+      attachment.setDisposition(Message.ATTACHMENT);
+      mixed.addBodyPart(attachment);
+    }
+    message.setContent(mixed);
+    return bytes(message);
+  }
+
   /** An attachment part with no filename, which must warn rather than fail. */
   static byte[] unnamedAttachment() throws Exception {
     MimeMessage message = envelope();

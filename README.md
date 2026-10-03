@@ -175,7 +175,7 @@ place (their bytes are handed over so the coordinator can re-parse them).
 | `GRPC_EMAIL_PORT` | `50054` | Listen port |
 | `GRPC_EMAIL_MAX_DOCUMENT_MIB` | `64` | Per-message byte cap (`RESOURCE_EXHAUSTED` above it) |
 | `GRPC_EMAIL_MAX_ATTACHMENT_MIB` | `32` | Per-attachment payload cap for `include_attachment_bytes`; larger attachments are still described, just without their bytes |
-| `GRPC_EMAIL_MAX_CONCURRENT_PARSES` | `max(2, CPU cores)` | Parses in flight before queueing |
+| `GRPC_EMAIL_MAX_CONCURRENT_PARSES` | `max(2, CPU cores)` | Calls admitted at once, upload and parse together; further calls wait, unread |
 | `GRPC_EMAIL_METRICS_INTERVAL_SECONDS` | `60` | Metrics line interval, `0` disables |
 
 Metrics are a stdout line on the interval:
@@ -226,9 +226,18 @@ npm start                  # http://127.0.0.1:8090, bridge to 127.0.0.1:50054
 ## Concurrency model
 
 One parse per request on a virtual thread, with a semaphore bounding how many
-run at once. The bound protects heap, not CPU: MIME trees and MAPI property
-maps are held whole in memory. A poisoned message fails its own RPC and
-nothing else.
+calls are in flight. The bound protects heap, not CPU: the upload buffer, the
+MIME tree and the MAPI property maps are all held whole in memory, so a call
+takes its slot when its options arrive, before a single chunk is read, and
+keeps it until its trailer or its error. A call queued behind a busy server
+is simply not read: gRPC flow control leaves its bytes in the client's send
+window, so waiting callers hold no buffers. A poisoned message fails its own
+RPC and nothing else.
+
+A client that cancels, or whose deadline passes, stops its parse at the next
+part and gives the slot back at once; nothing more is written to it. Set a
+deadline (gRParse does): a client that stops sending mid-upload without one
+keeps its slot until its connection goes away.
 
 ## Tests
 

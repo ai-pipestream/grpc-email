@@ -357,7 +357,9 @@ message GetServiceInfoResponse {
   // Per-attachment payload cap for include_attachment_bytes. Larger
   // attachments are still described, just without their bytes.
   uint64 max_attachment_bytes = 7;
-  // Messages parsed concurrently before further parses queue.
+  // Calls admitted at once, upload and parse together. A call takes its
+  // slot when its options arrive, before any chunk is read; further calls
+  // wait, unread, until a slot frees.
   uint32 max_concurrent_parses = 8;
   // Frontend advertisement. The demo shell reads it to build its tab bar.
   UiInfo ui = 9;

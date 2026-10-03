@@ -27,4 +27,11 @@ public interface ParseSink {
 
   /** Records a degradation. Warnings ride the ParseStatus trailer. */
   void warn(String warning);
+
+  /**
+   * Throws {@link ParseCancelledException} once the client is gone, so a
+   * parser stops between parts rather than decoding the rest for nobody.
+   * Parsers call it before each part and attachment they turn to.
+   */
+  default void checkpoint() {}
 }

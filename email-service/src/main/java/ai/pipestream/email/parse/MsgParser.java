@@ -92,6 +92,7 @@ public final class MsgParser {
             + unguessable.getMessage());
       }
       sink.info(envelope(message, options.documentId(), sink));
+      sink.checkpoint();
       bodies(message, sink);
       attachments(message, options, sink);
     } catch (IOException closeFailed) {
@@ -302,6 +303,7 @@ public final class MsgParser {
       return;
     }
     for (int index = 0; index < found.length; index++) {
+      sink.checkpoint();
       AttachmentChunks chunk = found[index];
       String filename = firstNonEmpty(
           text(chunk.getAttachLongFileName()), text(chunk.getAttachFileName()));

@@ -14,7 +14,7 @@ import jakarta.mail.internet.MimeMultipart;
 import jakarta.mail.internet.MimePart;
 import jakarta.mail.internet.MimePartDataSource;
 import jakarta.mail.internet.MimeUtility;
-import java.io.ByteArrayInputStream;
+import jakarta.mail.util.SharedByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
@@ -90,8 +90,10 @@ public final class EmlParser {
   public static void parse(byte[] bytes, ParseOptions options, ParseSink sink) {
     MimeMessage message;
     try {
+      // A shared stream: every part reads the upload's own bytes in place,
+      // where a plain stream made Jakarta Mail copy the whole body first.
       message = new MimeMessage(
-          Session.getInstance(LENIENT), new ByteArrayInputStream(bytes));
+          Session.getInstance(LENIENT), new SharedByteArrayInputStream(bytes));
     } catch (MessagingException unreadable) {
       throw new InvalidEmailException(
           "unreadable RFC 822 message: " + unreadable.getMessage(), unreadable);
@@ -128,6 +130,7 @@ public final class EmlParser {
   private static void walk(
       Part part, String path, int depth, ParseOptions options, ParseSink sink,
       WalkState state) {
+    sink.checkpoint();
     if (isMultipart(part)) {
       // A megabyte of input nests thousands of multiparts deep, and every
       // level rescans the bytes below it before the recursion ends in a

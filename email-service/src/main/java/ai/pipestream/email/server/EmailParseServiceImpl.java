@@ -6,6 +6,7 @@ import ai.pipestream.email.parse.EmlParser;
 import ai.pipestream.email.parse.HeaderProjection;
 import ai.pipestream.email.parse.InvalidEmailException;
 import ai.pipestream.email.parse.MsgParser;
+import ai.pipestream.email.parse.ParseCancelledException;
 import ai.pipestream.email.parse.ParseOptions;
 import ai.pipestream.email.parse.ParseSink;
 import ai.pipestream.email.parse.UnsupportedFormatException;
@@ -23,6 +24,7 @@ import ai.pipestream.email.v1.ParseStatus;
 import ai.pipestream.email.v1.UiInfo;
 import com.google.protobuf.ByteString;
 import io.grpc.Status;
+import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -31,9 +33,13 @@ import java.io.UncheckedIOException;
 import java.net.URI;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import java.util.jar.Attributes;
 import java.util.jar.Manifest;
 
@@ -93,7 +99,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
   @Override
   public StreamObserver<ParseEmailRequest> parseEmail(
       StreamObserver<ParseEmailResponse> responses) {
-    return new Upload(responses);
+    return new Upload(responses).attach();
   }
 
   @Override
@@ -166,6 +172,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
     private final StreamObserver<ParseEmailResponse> responses;
     private final ParseOptions options;
     private final EmailDocumentFold fold;
+    private final BooleanSupplier cancelled;
     private final List<String> warnings = new ArrayList<>();
     private boolean infoSent;
     private int bodyParts;
@@ -175,9 +182,11 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
     private Sink(
         StreamObserver<ParseEmailResponse> responses,
         ParseOptions options,
-        boolean emitDocument) {
+        boolean emitDocument,
+        BooleanSupplier cancelled) {
       this.responses = responses;
       this.options = options;
+      this.cancelled = cancelled;
       this.fold = emitDocument
           ? new EmailDocumentFold(SERVICE_VERSION,
               new EmailDocumentFold.SourceOrigin(options.filename(), options.contentType()))
@@ -219,6 +228,13 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
     @Override
     public synchronized void warn(String warning) {
       warnings.add(warning);
+    }
+
+    @Override
+    public void checkpoint() {
+      if (cancelled.getAsBoolean()) {
+        throw new ParseCancelledException();
+      }
     }
 
     private synchronized boolean infoSent() {
@@ -264,23 +280,49 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
     private int length() {
       return count;
     }
+
+    /**
+     * Hands over the bytes received and lets go of the growth array, so the
+     * parse does not run with the message held twice. When the array is
+     * already exactly full it is handed over as is, with no copy at all.
+     */
+    private byte[] take() {
+      byte[] bytes = count == buf.length ? buf : Arrays.copyOf(buf, count);
+      buf = new byte[0];
+      count = 0;
+      return bytes;
+    }
   }
 
   /**
    * One ParseEmail call. Accumulates chunks, sniffs the format from the
    * bytes as they arrive, and emits the envelope the moment the header block
    * is complete.
+   *
+   * <p>A call holds a parse slot from the moment its options arrive until it
+   * ends, and no chunk is read before the slot is held. Through a transport,
+   * flow control does the waiting: the next message is requested only once
+   * the call is admitted and each chunk has been taken in, so a call queued
+   * behind a busy server holds no buffer at all and its bytes stay in the
+   * client's own send window. A cancelled call (the client gave up, or its
+   * deadline passed) stops at the parser's next checkpoint and gives its slot
+   * back.
    */
   private final class Upload implements StreamObserver<ParseEmailRequest> {
 
     private final StreamObserver<ParseEmailResponse> responses;
+    /** The same observer when a transport drives the call; null when driven directly. */
+    private final ServerCallStreamObserver<ParseEmailResponse> call;
     private final Buffer buffer = new Buffer();
+    private final AtomicBoolean holdsSlot = new AtomicBoolean();
 
     private ParseOptions options;
     private Sink sink;
     private long cap = maxDocumentBytes;
     private boolean sawComplete;
-    private boolean aborted;
+    private volatile boolean parseScheduled;
+    private volatile boolean aborted;
+    private volatile boolean cancelled;
 
     private int scanFrom;
     private boolean headerBlockFound;
@@ -289,11 +331,25 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
 
     private Upload(StreamObserver<ParseEmailResponse> responses) {
       this.responses = responses;
+      this.call = responses instanceof ServerCallStreamObserver<ParseEmailResponse> server
+          ? server
+          : null;
+    }
+
+    /** Wires cancellation and flow control; called before the call starts. */
+    private Upload attach() {
+      if (call != null) {
+        call.setOnCancelHandler(this::cancel);
+        call.disableAutoRequest();
+        // The options message is read straight away; chunks wait for a slot.
+        call.request(1);
+      }
+      return this;
     }
 
     @Override
     public void onNext(ParseEmailRequest request) {
-      if (aborted) {
+      if (aborted || cancelled) {
         return;
       }
       try {
@@ -328,7 +384,72 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
           listAttachments(wire),
           wire.getIncludeAttachmentBytes(),
           maxAttachmentBytes);
-      sink = new Sink(responses, options, wire.getEmitDocument());
+      sink = new Sink(responses, options, wire.getEmitDocument(), () -> cancelled);
+      admit();
+    }
+
+    /**
+     * Takes a parse slot before a single byte of the message is read. With
+     * a transport the wait happens off the transport's threads, and the next
+     * message is requested only once the slot is held. Driven directly there
+     * is no flow control to lean on, so the slot is taken inline.
+     */
+    private void admit() {
+      if (call == null) {
+        try {
+          parseSlots.acquire();
+          holdsSlot.set(true);
+        } catch (InterruptedException interrupted) {
+          Thread.currentThread().interrupt();
+          abort(Status.UNAVAILABLE.withDescription("server shutting down"));
+        }
+        return;
+      }
+      try {
+        executor.execute(() -> {
+          try {
+            parseSlots.acquire();
+          } catch (InterruptedException interrupted) {
+            abort(Status.UNAVAILABLE.withDescription("server shutting down"));
+            return;
+          }
+          holdsSlot.set(true);
+          if (aborted || cancelled) {
+            // Ended while it waited; the slot goes straight back.
+            releaseSlot();
+            return;
+          }
+          call.request(1);
+        });
+      } catch (RejectedExecutionException shuttingDown) {
+        abort(Status.UNAVAILABLE.withDescription("server shutting down"));
+      }
+    }
+
+    /** Gives the parse slot back, once, whichever path gets here first. */
+    private void releaseSlot() {
+      if (holdsSlot.compareAndSet(true, false)) {
+        parseSlots.release();
+      }
+    }
+
+    /**
+     * The client cancelled, or its deadline passed. A parse already running
+     * notices at its next checkpoint and releases the slot itself; otherwise
+     * the slot is released here.
+     */
+    private void cancel() {
+      cancelled = true;
+      if (!parseScheduled) {
+        releaseSlot();
+      }
+    }
+
+    /** Asks the transport for the next message once this one is taken in. */
+    private void requestNext() {
+      if (call != null && !aborted && !cancelled) {
+        call.request(1);
+      }
     }
 
     /**
@@ -365,6 +486,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
         sawComplete = true;
       }
       sniff();
+      requestNext();
     }
 
     /**
@@ -403,12 +525,14 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
 
     @Override
     public void onError(Throwable error) {
+      // The client cancelled or the transport failed: nobody is listening.
       aborted = true;
+      cancel();
     }
 
     @Override
     public void onCompleted() {
-      if (aborted) {
+      if (aborted || cancelled) {
         return;
       }
       if (options == null) {
@@ -428,24 +552,29 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
             .withDescription("stream ended without a chunk marked complete"));
         return;
       }
-      byte[] bytes = buffer.toByteArray();
+      byte[] bytes = buffer.take();
       metrics.bytesReceived(bytes.length);
-      executor.execute(() -> run(bytes));
+      parseScheduled = true;
+      try {
+        executor.execute(() -> run(bytes));
+      } catch (RejectedExecutionException shuttingDown) {
+        parseScheduled = false;
+        abort(Status.UNAVAILABLE.withDescription("server shutting down"));
+      }
     }
 
+    /** Parses on a virtual thread, holding the slot admission already took. */
     private void run(byte[] bytes) {
       try {
-        parseSlots.acquire();
-      } catch (InterruptedException interrupted) {
-        Thread.currentThread().interrupt();
-        abort(Status.UNAVAILABLE.withDescription("server shutting down"));
-        return;
-      }
-      try {
+        sink.checkpoint();
         dispatch(bytes);
+        // The trailer and the document are for a client that is still there.
+        sink.checkpoint();
         sink.trailer(bytes);
         responses.onCompleted();
         metrics.messageParsed();
+      } catch (ParseCancelledException gone) {
+        // The client went away mid-parse; there is nobody left to answer.
       } catch (Throwable failure) {
         // Throwable, not Exception: a StackOverflowError or an
         // OutOfMemoryError escaping this virtual thread would leave the
@@ -453,7 +582,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
         // never answered.
         fail(failure);
       } finally {
-        parseSlots.release();
+        releaseSlot();
       }
     }
 
@@ -502,7 +631,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
         throw new UnsupportedFormatException(
             "bytes are neither an RFC 822 message nor an Outlook .msg");
       }
-      if (EmailSniffer.looksLikeHeaderBlock(buffer.array(), buffer.length())) {
+      if (EmailSniffer.looksLikeHeaderBlock(bytes, bytes.length)) {
         throw new InvalidEmailException(
             "message ended inside the header block; no empty line terminated the headers");
       }
@@ -510,7 +639,12 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
           "bytes are neither an RFC 822 message nor an Outlook .msg");
     }
 
-    private void abort(Status status) {
+    /**
+     * Ends the call with an error status, once, and gives the slot back.
+     * Synchronized because admission runs on its own thread and can fail
+     * while a request callback is failing the same call.
+     */
+    private synchronized void abort(Status status) {
       if (aborted) {
         return;
       }
@@ -520,6 +654,10 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
       } catch (RuntimeException alreadyClosed) {
         // The call ended underneath us (the client went away); there is
         // nobody left to tell, and nothing more to do.
+      } finally {
+        if (!parseScheduled) {
+          releaseSlot();
+        }
       }
     }
   }
