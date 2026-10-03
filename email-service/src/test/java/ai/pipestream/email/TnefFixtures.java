@@ -97,6 +97,33 @@ final class TnefFixtures {
     return stream.build();
   }
 
+  /**
+   * One named attachment followed by {@code records} attAttachment records
+   * of a single byte each, twelve bytes apiece, none of them a MAPI property
+   * list POI can read.
+   */
+  static byte[] unreadableRecords(int records) {
+    Stream stream = new Stream()
+        .message(ATT_OEM_CODEPAGE, ATP_LONG, codePage(1252))
+        .attachment(ATT_ATTACH_RENDER_DATA, ATP_BYTE, renderData())
+        .attachment(ATT_ATTACH_TITLE, ATP_STRING, (SEAL_NAME + "\0").getBytes(WINDOWS_1252))
+        .attachment(ATT_ATTACH_DATA, ATP_BYTE, SEAL_BYTES);
+    for (int record = 0; record < records; record++) {
+      stream.attachment(ATT_ATTACHMENT, ATP_BYTE, new byte[] {1});
+    }
+    return stream.build();
+  }
+
+  /** {@code slots} attachments that carry one byte of data each and no name. */
+  static byte[] namelessAttachments(int slots) {
+    Stream stream = new Stream().message(ATT_OEM_CODEPAGE, ATP_LONG, codePage(1252));
+    for (int slot = 0; slot < slots; slot++) {
+      stream.attachment(ATT_ATTACH_RENDER_DATA, ATP_BYTE, renderData())
+          .attachment(ATT_ATTACH_DATA, ATP_BYTE, new byte[] {(byte) slot});
+    }
+    return stream.build();
+  }
+
   /** Bytes that carry the TNEF signature and nothing readable after it. */
   static byte[] signatureThenGarbage() {
     return new byte[] {0x78, (byte) 0x9F, 0x3E, 0x22, 0x01, 0x00, 0x07, 0x07, 0x07, 0x07};

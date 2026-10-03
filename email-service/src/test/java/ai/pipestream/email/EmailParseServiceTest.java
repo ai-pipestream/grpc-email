@@ -743,6 +743,37 @@ class EmailParseServiceTest {
   }
 
   @Test
+  @DisplayName("a flood of unreadable TNEF records costs one warning, and the attachment survives")
+  void unreadableTnefRecordsAreCountedOnce() throws Exception {
+    byte[] message = EmlFixtures.withWinmailDat(TnefFixtures.unreadableRecords(20_000));
+    Result result = parseWhole(message, "eml-tnef-unreadable");
+    assertThat(result.attachments())
+        .extracting(Attachment::getFilename)
+        .containsExactly(TnefFixtures.SEAL_NAME);
+    assertThat(result.status().getWarningsList())
+        .filteredOn(warning -> warning.contains("could not be read"))
+        .singleElement()
+        .asString()
+        .contains("20000 MAPI property record(s)");
+  }
+
+  @Test
+  @DisplayName("the trailer lists the first warnings and counts the rest")
+  void warningsAreCappedOnTheTrailer() throws Exception {
+    int nameless = EmailParseServiceImpl.MAX_WARNINGS + 50;
+    byte[] message = EmlFixtures.withWinmailDat(TnefFixtures.namelessAttachments(nameless));
+    Result result = parseWhole(message, "eml-tnef-nameless");
+    assertThat(result.status().getAttachments())
+        .as("every attachment is still counted")
+        .isEqualTo(nameless);
+    List<String> warnings = result.status().getWarningsList();
+    assertThat(warnings).hasSize(EmailParseServiceImpl.MAX_WARNINGS + 1);
+    assertThat(warnings.getLast())
+        .isEqualTo("50 further warning(s) suppressed; only the first "
+            + EmailParseServiceImpl.MAX_WARNINGS + " are listed");
+  }
+
+  @Test
   @DisplayName("a winmail.dat attached to a .msg is unpacked the same way")
   void winmailDatInsideAMsgIsUnpacked() throws Exception {
     Result result = parseWhole(

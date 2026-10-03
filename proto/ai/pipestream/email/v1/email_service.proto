@@ -333,7 +333,8 @@ message ParseStatus {
   // Outcome of the parse.
   State state = 1;
   // Human-readable notes about degraded or skipped content, for example an
-  // unnamed attachment part or an RTF-only body.
+  // unnamed attachment part or an RTF-only body. At most the first 100 are
+  // listed; past that, one last entry says how many more were suppressed.
   repeated string warnings = 2;
   // Number of BodyPart events emitted.
   uint32 body_parts = 3;

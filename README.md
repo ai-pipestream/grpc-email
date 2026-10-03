@@ -66,7 +66,7 @@ Document projection below).
 | `BodyPart` | per text part, in MIME order | `part_id`, `PLAIN`/`HTML` + `content_type_raw`, UTF-8 text, declared charset, MAPI source property for `.msg` |
 | `Attachment` | per attachment, unless `omit_attachment_list` | index, filename, content type, size, content id, inline flag, optional bytes |
 | `Document` | once, immediately before the trailer, only when `emit_document` | the whole message as one `ai.pipestream.document.v1.Document` |
-| `ParseStatus` | last, exactly once | `STATE_OK` / `STATE_PARTIAL`, warnings, counts, message size |
+| `ParseStatus` | last, exactly once | `STATE_OK` / `STATE_PARTIAL`, warnings (the first 100, then a count of the rest), counts, message size |
 
 Format is detected from the bytes (OLE2 signature, or an RFC 822 header block
 that carries at least one real mail field). The advisory content type is never
@@ -257,7 +257,7 @@ collectors), and its slot comes back.
 
 ## Tests
 
-`./gradlew test` runs 157 tests with no network and no committed binaries.
+`./gradlew test` runs 159 tests with no network and no committed binaries.
 Fixtures are authored in memory: Jakarta Mail writes the `.eml`, and
 `MsgFixtures` builds `.msg` bytes from the MS-OXMSG layout up (compound-file
 streams, property chunks, recipient and attachment storages, an uncompressed

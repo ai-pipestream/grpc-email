@@ -220,6 +220,15 @@ final class TnefContainer {
     private byte[] htmlBytes;
     private final List<Packed> attachments = new ArrayList<>();
     private final List<String> problems = new ArrayList<>();
+    /**
+     * MAPI property records POI could not read. A record can be twelve
+     * bytes, so these are counted and reported once rather than one problem
+     * each: a container of nothing else would otherwise turn every dozen
+     * bytes of input into a warning on the trailer.
+     */
+    private int unreadableRecords;
+    /** What went wrong with the first of them, as an example. */
+    private String firstUnreadable = "";
   }
 
   private static Contents read(byte[] tnef) {
@@ -336,6 +345,11 @@ final class TnefContainer {
 
   /** Decodes what needed the whole stream first: code pages, and names to choose between. */
   private static void finish(Contents contents) {
+    if (contents.unreadableRecords > 0) {
+      contents.problems.add(contents.unreadableRecords
+          + " MAPI property record(s) could not be read and were skipped, the first being "
+          + contents.firstUnreadable);
+    }
     if (contents.plain.isEmpty() && !contents.attBody.isEmpty()) {
       contents.plain = stripNul(new String(
           contents.attBody.getBytes(StandardCharsets.ISO_8859_1), contents.codePage));
@@ -350,7 +364,7 @@ final class TnefContainer {
     }
   }
 
-  /** A MAPI property list, decoded by POI; an unreadable list is reported and skipped. */
+  /** A MAPI property list, decoded by POI; an unreadable list is counted and skipped. */
   private static List<MAPIAttribute> properties(
       Contents contents, int id, byte[] tnef, int from, int dataStart, int length) {
     try {
@@ -360,8 +374,10 @@ final class TnefContainer {
         return mapi.getMAPIAttributes();
       }
     } catch (IOException | RuntimeException unreadable) {
-      contents.problems.add("the MAPI properties in record 0x" + Integer.toHexString(id)
-          + " could not be read (" + unreadable.getMessage() + "); that record was skipped");
+      if (contents.unreadableRecords++ == 0) {
+        contents.firstUnreadable = "record 0x" + Integer.toHexString(id) + " ("
+            + unreadable.getMessage() + ")";
+      }
     }
     return List.of();
   }

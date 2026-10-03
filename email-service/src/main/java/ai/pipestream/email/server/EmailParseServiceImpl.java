@@ -81,6 +81,15 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
    */
   public static final Duration DEFAULT_IDLE_TIMEOUT = Duration.ofSeconds(30);
 
+  /**
+   * Warnings one trailer carries. Past this many the rest are counted and
+   * reported in one closing line: a hostile message can raise a warning for
+   * every few bytes it holds, and a trailer of millions of them would outgrow
+   * the client's inbound message limit (4 MiB by default in grpc-java), so
+   * the call would end without the status that makes it a success.
+   */
+  public static final int MAX_WARNINGS = 100;
+
   /** Read once: the answer cannot change while the JVM is up. */
   private static final String MAIL_VERSION = readMailVersion();
 
@@ -220,6 +229,8 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
     private final EmailDocumentFold fold;
     private final BooleanSupplier cancelled;
     private final List<String> warnings = new ArrayList<>();
+    /** Warnings past {@link #MAX_WARNINGS}, counted but not kept. */
+    private long suppressedWarnings;
     private boolean infoSent;
     private int bodyParts;
     private int attachments;
@@ -273,7 +284,11 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
 
     @Override
     public synchronized void warn(String warning) {
-      warnings.add(warning);
+      if (warnings.size() < MAX_WARNINGS) {
+        warnings.add(warning);
+      } else {
+        suppressedWarnings++;
+      }
     }
 
     @Override
@@ -306,6 +321,10 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
           .setAttachments(attachments)
           .setAttachmentBytes(attachmentBytes)
           .setMessageBytes(message.length);
+      if (suppressedWarnings > 0) {
+        status.addWarnings(suppressedWarnings + " further warning(s) suppressed; only the first "
+            + MAX_WARNINGS + " are listed");
+      }
       ParseEmailResponse trailer = ParseEmailResponse.newBuilder().setStatus(status).build();
       if (fold != null) {
         fold.consume(trailer);

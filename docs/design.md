@@ -84,10 +84,10 @@ normally carries a plain rendering of the same body beside its container;
 those parts are `<part_id>/body:plain|html|rtf` and set `source_property`.
 Records are framed here and only MAPI property lists are decoded by POI's
 HMEF, whose own reader drops every attachment when one record is damaged;
-here a damaged record is skipped with a warning and a stream cut short keeps
-what came before the cut. A container with no readable record is described
-as the opaque attachment it then is. Nothing found inside a container is
-unpacked again.
+here a damaged record is skipped, one warning per container counting them
+all, and a stream cut short keeps what came before the cut. A container
+with no readable record is described as the opaque attachment it then is.
+Nothing found inside a container is unpacked again.
 
 ## 4. Mapping to Document
 
