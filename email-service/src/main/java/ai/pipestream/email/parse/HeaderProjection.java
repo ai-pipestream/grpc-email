@@ -298,9 +298,10 @@ public final class HeaderProjection {
    * the mailboxes they are; an empty group ({@code "undisclosed-recipients:;"})
    * correctly yields none.
    *
-   * <p>The scan honours quoted strings, comments and angle-addrs, so a colon
-   * or semicolon inside any of those is content and is left alone. A value
-   * with no group in it comes back unchanged.
+   * <p>The scan honours quoted strings, comments, angle-addrs and domain
+   * literals ({@code user@[IPv6:2001:db8::1]}), so a colon or semicolon
+   * inside any of those is content and is left alone. A value with no group
+   * in it comes back unchanged.
    *
    * @param value one unfolded address-list header value
    * @return the same list with every group replaced by its members
@@ -310,6 +311,7 @@ public final class HeaderProjection {
     int phrase = 0;
     boolean quoted = false;
     boolean angle = false;
+    boolean literal = false;
     int comment = 0;
     for (int index = 0; index < value.length(); index++) {
       char character = value.charAt(index);
@@ -348,8 +350,16 @@ public final class HeaderProjection {
           angle = false;
           out.append(character);
         }
+        case '[' -> {
+          literal = true;
+          out.append(character);
+        }
+        case ']' -> {
+          literal = false;
+          out.append(character);
+        }
         case ':' -> {
-          if (angle) {
+          if (angle || literal) {
             out.append(character);
           } else {
             // The group's display name is a label, not a recipient.
@@ -357,7 +367,7 @@ public final class HeaderProjection {
           }
         }
         case ';' -> {
-          if (angle) {
+          if (angle || literal) {
             out.append(character);
           } else {
             out.append(',');
