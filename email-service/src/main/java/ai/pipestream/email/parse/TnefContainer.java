@@ -8,7 +8,6 @@ import java.io.IOException;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.function.IntSupplier;
 import org.apache.poi.hmef.attribute.MAPIAttribute;
@@ -110,11 +109,12 @@ final class TnefContainer {
     for (int slot = 0; slot < contents.attachments.size(); slot++) {
       sink.checkpoint();
       Packed packed = contents.attachments.get(slot);
-      if (packed.data == null && packed.filename.isEmpty()) {
+      if (packed.dataStart < 0 && packed.filename.isEmpty()) {
         empty++;
         continue;
       }
-      emitAttachment(packed, path + "/attach:" + slot, options, sink, nextIndex.getAsInt());
+      emitAttachment(
+          tnef, packed, path + "/attach:" + slot, options, sink, nextIndex.getAsInt());
     }
     if (empty > 0) {
       sink.warn("TNEF container at part " + path + ": " + empty
@@ -172,9 +172,10 @@ final class TnefContainer {
   }
 
   private static void emitAttachment(
-      Packed packed, String partId, ParseOptions options, ParseSink sink, int index) {
-    byte[] payload = packed.data == null ? new byte[0] : packed.data;
-    if (packed.data == null) {
+      byte[] tnef, Packed packed, String partId, ParseOptions options, ParseSink sink,
+      int index) {
+    boolean hasData = packed.dataStart >= 0;
+    if (!hasData) {
       sink.warn("attachment " + index + " at part " + partId + " carries no data in the TNEF"
           + " container (an embedded message or an OLE object); described without its bytes");
     }
@@ -187,10 +188,12 @@ final class TnefContainer {
         .setPartId(partId)
         .setFilename(packed.filename)
         .setContentType(HeaderProjection.baseType(packed.mimeTag))
-        .setSizeBytes(payload.length)
+        .setSizeBytes(packed.dataLength)
         .setContentId(contentId)
         .setInline(!contentId.isEmpty());
-    options.attachPayload(attachment, payload, sink);
+    if (hasData) {
+      options.attachPayload(attachment, tnef, packed.dataStart, packed.dataLength, sink);
+    }
     sink.attachment(attachment.build());
   }
 
@@ -204,7 +207,12 @@ final class TnefContainer {
     private String filename = "";
     private String mimeTag = "";
     private String contentId = "";
-    private byte[] data;
+    /**
+     * Where attAttachData sits in the stream, or -1 when the slot has none.
+     * Kept as a slice and copied only if the client asked for bytes.
+     */
+    private int dataStart = -1;
+    private int dataLength;
   }
 
   /** Everything read from one stream, and what could not be. */
@@ -294,7 +302,8 @@ final class TnefContainer {
       }
       Packed current = contents.attachments.getLast();
       if (id == TNEFProperty.ID_ATTACHDATA.id) {
-        current.data = Arrays.copyOfRange(tnef, dataStart, dataStart + length);
+        current.dataStart = dataStart;
+        current.dataLength = length;
       } else if (id == TNEFProperty.ID_ATTACHTITLE.id) {
         current.title = string(contents, tnef, dataStart, length);
       } else if (id == TNEFProperty.ID_ATTACHMENT.id) {

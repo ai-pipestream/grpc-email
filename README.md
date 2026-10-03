@@ -262,7 +262,7 @@ bytes: once admitted, the whole upload must finish within the upload timeout
 
 ## Tests
 
-`./gradlew test` runs 161 tests with no network and no committed binaries.
+`./gradlew test` runs 162 tests with no network and no committed binaries.
 Fixtures are authored in memory: Jakarta Mail writes the `.eml`, and
 `MsgFixtures` builds `.msg` bytes from the MS-OXMSG layout up (compound-file
 streams, property chunks, recipient and attachment storages, an uncompressed

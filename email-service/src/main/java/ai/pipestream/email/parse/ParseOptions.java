@@ -41,13 +41,22 @@ public record ParseOptions(
    * without its bytes, and the sink is told why.
    */
   void attachPayload(Attachment.Builder attachment, byte[] payload, ParseSink sink) {
+    attachPayload(attachment, payload, 0, payload.length, sink);
+  }
+
+  /**
+   * The same, for a payload that is a slice of a larger buffer: the slice is
+   * copied once, straight into the attachment, and only when bytes were asked for.
+   */
+  void attachPayload(
+      Attachment.Builder attachment, byte[] source, int offset, int length, ParseSink sink) {
     if (!includeAttachmentBytes) {
       return;
     }
-    if (payload.length <= maxAttachmentBytes) {
-      attachment.setData(ByteString.copyFrom(payload));
+    if (length <= maxAttachmentBytes) {
+      attachment.setData(ByteString.copyFrom(source, offset, length));
     } else {
-      sink.warn("attachment " + attachment.getIndex() + " (" + payload.length
+      sink.warn("attachment " + attachment.getIndex() + " (" + length
           + " bytes) exceeds the per-attachment cap; described without its bytes");
     }
   }

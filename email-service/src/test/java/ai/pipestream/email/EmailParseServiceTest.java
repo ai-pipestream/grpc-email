@@ -662,6 +662,22 @@ class EmailParseServiceTest {
   }
 
   @Test
+  @DisplayName("a winmail.dat's attachments are sized but carry no bytes unless asked for")
+  void winmailDatAttachmentsCarryNoBytesUnlessAsked() throws Exception {
+    byte[] message = EmlFixtures.withWinmailDat(TnefFixtures.winmailDat(true));
+    Result result = parse(message, ParseEmailOptions.newBuilder()
+        .setDocumentId("eml-tnef-listed").build(), message.length);
+    assertThat(result.error()).isNull();
+    assertThat(result.attachments())
+        .extracting(Attachment::getSizeBytes)
+        .containsExactly((long) TnefFixtures.ORDER_BYTES.length,
+            (long) TnefFixtures.SEAL_BYTES.length);
+    assertThat(result.attachments())
+        .as("listing alone never copies a payload onto the wire")
+        .allMatch(attachment -> attachment.getData().isEmpty());
+  }
+
+  @Test
   @DisplayName("a message that is only a TNEF container takes its body from it")
   void tnefOnlyMessageTakesItsBodyFromTheContainer() throws Exception {
     Result result = parseWhole(EmlFixtures.tnefOnly(TnefFixtures.winmailDat(true)), "eml-tnef-only");
