@@ -283,7 +283,15 @@ public final class MsgParser {
       sink.warn("message carries no plain, HTML, or RTF body");
       return;
     }
-    String extracted = RtfPlainText.extract(rtf);
+    String extracted;
+    try {
+      extracted = RtfPlainText.extract(rtf);
+    } catch (RuntimeException malformed) {
+      // A damaged RTF body costs the body, not the envelope and the
+      // attachments around it.
+      sink.warn("RTF-only body could not be converted to text: " + malformed);
+      return;
+    }
     sink.warn("RTF-only body: plain text extracted without layout, tables, or formatting");
     if (!extracted.isEmpty()) {
       sink.bodyPart(

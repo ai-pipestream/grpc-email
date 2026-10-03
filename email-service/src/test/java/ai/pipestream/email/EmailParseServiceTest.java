@@ -761,6 +761,19 @@ class EmailParseServiceTest {
   }
 
   @Test
+  @DisplayName("a malformed RTF number costs nothing but the number")
+  void malformedRtfParameterKeepsTheMessage() throws Exception {
+    // An overlong control-word parameter used to throw NumberFormatException
+    // out of the RTF reader and turn the whole .msg into INTERNAL.
+    String rtf = "{\\rtf1\\ansi\\fs99999999999 Hearing set for the 14th.\\par}";
+    Result result = parseWhole(MsgFixtures.rtfOnly(rtf), "msg-rtf-overflow");
+    assertThat(result.info().getSubject()).isEqualTo("Rich text only");
+    assertThat(result.bodies()).hasSize(1);
+    assertThat(result.bodies().get(0).getText()).isEqualTo("Hearing set for the 14th.");
+    assertThat(result.status().getWarningsList()).anyMatch(warning -> warning.contains("RTF-only"));
+  }
+
+  @Test
   void ole2ThatIsNotAMapiMessageIsUnimplemented() throws Exception {
     byte[] container = MsgFixtures.ole2ButNotMapi();
     Result result = parse(container, listing("msg-not"), container.length);

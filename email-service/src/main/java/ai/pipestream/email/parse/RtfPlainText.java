@@ -26,6 +26,9 @@ public final class RtfPlainText {
       "colorschememapping", "latentstyles", "filetbl", "xmlnstbl", "mmathPr", "upr",
       "header", "footer", "footnote", "revtbl", "protusertbl");
 
+  /** Ten digits cover every 32-bit value; more is malformed input. */
+  private static final int MAX_PARAMETER_DIGITS = 10;
+
   private RtfPlainText() {}
 
   /** Extracts best-effort plain text; returns an empty string for empty input. */
@@ -97,12 +100,11 @@ public final class RtfPlainText {
               paramEnd++;
             }
             int digitsStart = paramEnd;
-            while (paramEnd < length && Character.isDigit(rtf.charAt(paramEnd))) {
+            while (paramEnd < length && isAsciiDigit(rtf.charAt(paramEnd))) {
               paramEnd++;
             }
             Integer parameter = paramEnd > digitsStart
-                ? Integer.valueOf((negative ? -1 : 1) * Integer.parseInt(
-                    rtf.substring(digitsStart, paramEnd)))
+                ? Integer.valueOf(parameter(rtf, digitsStart, paramEnd, negative))
                 : null;
             // A single space after a control word is its delimiter, not text.
             int after = paramEnd < length && rtf.charAt(paramEnd) == ' ' ? paramEnd + 1 : paramEnd;
@@ -112,7 +114,9 @@ public final class RtfPlainText {
             } else if (word.equals("uc")) {
               unicodeSkip = parameter == null ? 1 : Math.max(0, parameter);
             } else if (word.equals("u") && parameter != null) {
-              if (!skipping) {
+              // A signed 16-bit code unit; anything outside that range is
+              // malformed and decodes to nothing rather than to garbage.
+              if (!skipping && parameter >= Short.MIN_VALUE && parameter <= 0xFFFF) {
                 text.append((char) (parameter < 0 ? parameter + 65536 : parameter));
               }
               pendingSkip = unicodeSkip;
@@ -150,6 +154,29 @@ public final class RtfPlainText {
       }
     }
     return text.toString().strip();
+  }
+
+  /**
+   * A control word's numeric parameter. RTF defines these as signed 16-bit
+   * integers (a few as 32-bit), so at most ten digits are read, as a long,
+   * and the result is clamped to the int range: a digit run too long for
+   * any integer is malformed input, not a reason to fail the message.
+   */
+  private static int parameter(String rtf, int from, int to, boolean negative) {
+    long value = 0;
+    for (int index = from; index < to && index < from + MAX_PARAMETER_DIGITS; index++) {
+      value = value * 10 + (rtf.charAt(index) - '0');
+    }
+    if (to - from > MAX_PARAMETER_DIGITS) {
+      value = Long.MAX_VALUE;
+    }
+    long signed = negative ? -value : value;
+    return (int) Math.max(Integer.MIN_VALUE, Math.min(Integer.MAX_VALUE, signed));
+  }
+
+  /** RTF is 7-bit: only ASCII digits form a parameter, never other scripts' digits. */
+  private static boolean isAsciiDigit(char character) {
+    return character >= '0' && character <= '9';
   }
 
   private static int hex(char high, char low) {
