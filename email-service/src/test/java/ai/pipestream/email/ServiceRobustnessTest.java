@@ -16,6 +16,7 @@ import io.grpc.inprocess.InProcessChannelBuilder;
 import io.grpc.inprocess.InProcessServerBuilder;
 import io.grpc.stub.ClientCallStreamObserver;
 import io.grpc.stub.StreamObserver;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -117,7 +118,11 @@ class ServiceRobustnessTest {
 
   /** One parse slot, so a slot that leaks blocks the next call outright. */
   private static EmailParseServiceImpl singleSlotService() {
-    return new EmailParseServiceImpl(MESSAGE_CAP, ATTACHMENT_CAP, 1, executor);
+    return singleSlotService(EmailParseServiceImpl.DEFAULT_IDLE_TIMEOUT);
+  }
+
+  private static EmailParseServiceImpl singleSlotService(Duration idleTimeout) {
+    return new EmailParseServiceImpl(MESSAGE_CAP, ATTACHMENT_CAP, 1, executor, idleTimeout);
   }
 
   // --- over the in-process transport: admission and cancellation ----------
@@ -128,7 +133,11 @@ class ServiceRobustnessTest {
 
   /** Starts a one-slot server behind a real (in-process) transport. */
   private void startOneSlotServer() throws Exception {
-    service = singleSlotService();
+    startOneSlotServer(EmailParseServiceImpl.DEFAULT_IDLE_TIMEOUT);
+  }
+
+  private void startOneSlotServer(Duration idleTimeout) throws Exception {
+    service = singleSlotService(idleTimeout);
     String name = InProcessServerBuilder.generateName();
     server = InProcessServerBuilder.forName(name).directExecutor()
         .addService(service)
@@ -167,11 +176,18 @@ class ServiceRobustnessTest {
 
     private static Call start(
         EmailParseServiceGrpc.EmailParseServiceStub stub, Consumer<Call> onBody) {
-      Call call = new Call(onBody);
-      call.requests = (ClientCallStreamObserver<ParseEmailRequest>) stub.parseEmail(call);
+      Call call = open(stub, onBody);
       call.requests.onNext(ParseEmailRequest.newBuilder()
           .setOptions(ParseEmailOptions.newBuilder().setDocumentId("admission"))
           .build());
+      return call;
+    }
+
+    /** Opens the stream and sends nothing at all, not even the options. */
+    private static Call open(
+        EmailParseServiceGrpc.EmailParseServiceStub stub, Consumer<Call> onBody) {
+      Call call = new Call(onBody);
+      call.requests = (ClientCallStreamObserver<ParseEmailRequest>) stub.parseEmail(call);
       return call;
     }
 
@@ -317,6 +333,63 @@ class ServiceRobustnessTest {
 
     Call next = Call.start(stub()).finishUpload(message, 0).await();
     assertThat(next.completed).isTrue();
+  }
+
+  /** Short enough to watch expire, long enough that a busy machine never trips it early. */
+  private static final Duration SHORT_IDLE = Duration.ofMillis(500);
+
+  @Test
+  @DisplayName("an upload that stalls without a deadline ends DEADLINE_EXCEEDED and frees its slot")
+  void aStalledUploadTimesOutAndFreesItsSlot() throws Exception {
+    startOneSlotServer(SHORT_IDLE);
+    byte[] message = EmlFixtures.plainText();
+    int headerEnd = EmlFixtures.headerBlockEnd(message);
+
+    // Half an upload, no deadline, and then nothing: this call used to keep
+    // the only slot for as long as its connection stayed up.
+    Call stalled = Call.start(stub()).chunk(message, 0, headerEnd, false).await();
+    assertThat(stalled.code()).isEqualTo(Status.Code.DEADLINE_EXCEEDED);
+    assertThat(Status.fromThrowable(stalled.failure.get()).getDescription())
+        .contains("no request frame arrived for 500 ms");
+
+    Call next = Call.start(stub()).finishUpload(message, 0).await();
+    assertThat(next.completed).as("the stalled call gave its slot back").isTrue();
+    assertThat(service.metrics().render()).contains("rejected=1,");
+  }
+
+  @Test
+  @DisplayName("a stream that never sends its options times out too")
+  void aSilentStreamTimesOut() throws Exception {
+    startOneSlotServer(SHORT_IDLE);
+    Call silent = Call.open(stub(), call -> { }).await();
+    assertThat(silent.code()).isEqualTo(Status.Code.DEADLINE_EXCEEDED);
+  }
+
+  @Test
+  @DisplayName("a call waiting for a slot is not timed out: nobody is reading it yet")
+  void aQueuedCallIsNotTimedOutWhileItWaits() throws Exception {
+    startOneSlotServer(SHORT_IDLE);
+    byte[] message = EmlFixtures.multipartWithAttachments();
+    int headerEnd = EmlFixtures.headerBlockEnd(message);
+
+    Call first = Call.start(stub()).chunk(message, 0, headerEnd, false).awaitFirstEvent();
+    Call queued = Call.start(stub()).finishUpload(message, 0);
+
+    // The slot holder keeps its own upload alive, a frame every 100 ms, for
+    // more than twice the idle timeout; the queued call waits all that time.
+    int offset = headerEnd;
+    for (int step = 0; step < 12; step++) {
+      Thread.sleep(100);
+      first.chunk(message, offset, offset + 16, false);
+      offset += 16;
+    }
+    assertThat(queued.done.getCount()).as("still waiting, not ended").isEqualTo(1);
+    assertThat(queued.eventCount()).as("and still not read").isZero();
+
+    first.finishUpload(message, offset).await();
+    assertThat(first.completed).as("a steady trickle never trips the timer").isTrue();
+    queued.await();
+    assertThat(queued.completed).isTrue();
   }
 
   @Test

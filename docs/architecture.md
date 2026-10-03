@@ -102,6 +102,7 @@ gRPC status, never a 200 with a partial lie:
 - `INVALID_ARGUMENT`: no bytes, truncated MIME, missing complete flag
 - `UNIMPLEMENTED`: not email
 - `RESOURCE_EXHAUSTED`: over the byte cap, or out of memory mid-parse
+- `DEADLINE_EXCEEDED`: the client stalled mid-upload past the idle timeout
 - `INTERNAL`: parser fault
 
 Every call ends with one of these, whatever the parse throws.

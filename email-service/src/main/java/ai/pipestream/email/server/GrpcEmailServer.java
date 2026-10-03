@@ -6,6 +6,7 @@ import io.grpc.Server;
 import io.grpc.protobuf.services.HealthStatusManager;
 import io.grpc.protobuf.services.ProtoReflectionService;
 import io.grpc.protobuf.services.ProtoReflectionServiceV1;
+import java.time.Duration;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -33,10 +34,13 @@ public final class GrpcEmailServer {
     final int maxConcurrent =
         intFromEnv("GRPC_EMAIL_MAX_CONCURRENT_PARSES", Math.max(2, cores), 1, 256);
     final int metricsInterval = intFromEnv("GRPC_EMAIL_METRICS_INTERVAL_SECONDS", 60, 0, 86400);
+    // No zero here: an idle stream with no bound is what the timeout prevents.
+    final Duration idleTimeout = Duration.ofSeconds(intFromEnv("GRPC_EMAIL_IDLE_TIMEOUT_SECONDS",
+        (int) EmailParseServiceImpl.DEFAULT_IDLE_TIMEOUT.toSeconds(), 1, 86400));
 
     ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     EmailParseServiceImpl service = new EmailParseServiceImpl(
-        maxDocumentBytes, maxAttachmentBytes, maxConcurrent, executor);
+        maxDocumentBytes, maxAttachmentBytes, maxConcurrent, executor, idleTimeout);
     HealthStatusManager health = new HealthStatusManager();
     Server server =
         Grpc.newServerBuilderForPort(port, InsecureServerCredentials.create())
@@ -54,7 +58,7 @@ public final class GrpcEmailServer {
         + " listening on 0.0.0.0:" + port + " (POI " + org.apache.poi.Version.getVersion()
         + ", max " + (maxDocumentBytes >> 20) + " MiB message / "
         + (maxAttachmentBytes >> 20) + " MiB attachment, " + maxConcurrent
-        + " concurrent parses)");
+        + " concurrent parses, " + idleTimeout.toSeconds() + " s idle timeout)");
 
     if (metricsInterval > 0) {
       Thread.ofPlatform().name("grpc-email-metrics").daemon().start(() -> {

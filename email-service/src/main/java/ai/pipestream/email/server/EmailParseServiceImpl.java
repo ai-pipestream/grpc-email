@@ -35,9 +35,13 @@ import java.net.URL;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.time.Duration;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.jar.Attributes;
@@ -69,14 +73,29 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
 
   private static final long MIB = 1024L * 1024L;
 
+  /**
+   * Longest the server waits for a request frame it has asked for, as in the
+   * fleet's other collectors. A call holds its parse slot from its options
+   * to its trailer, so without this a client that stalls mid-upload and set
+   * no deadline would keep the slot for as long as its connection lived.
+   */
+  public static final Duration DEFAULT_IDLE_TIMEOUT = Duration.ofSeconds(30);
+
   /** Read once: the answer cannot change while the JVM is up. */
   private static final String MAIL_VERSION = readMailVersion();
+
+  /**
+   * Arms every call's idle timer. Its only work is ending a stalled call,
+   * which takes microseconds, so one daemon thread serves the process.
+   */
+  private static final ScheduledThreadPoolExecutor IDLE_TIMERS = idleTimers();
 
   private final long maxDocumentBytes;
   private final long maxAttachmentBytes;
   private final int maxConcurrentParses;
   private final Semaphore parseSlots;
   private final ExecutorService executor;
+  private final Duration idleTimeout;
   private final ParseMetrics metrics = new ParseMetrics();
 
   public EmailParseServiceImpl(
@@ -84,11 +103,38 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
       long maxAttachmentBytes,
       int maxConcurrentParses,
       ExecutorService executor) {
+    this(maxDocumentBytes, maxAttachmentBytes, maxConcurrentParses, executor,
+        DEFAULT_IDLE_TIMEOUT);
+  }
+
+  /**
+   * @param idleTimeout longest wait for a request frame the server has asked
+   *     for before the call ends with DEADLINE_EXCEEDED; raised to one
+   *     millisecond if smaller, because an idle stream is always bounded
+   */
+  public EmailParseServiceImpl(
+      long maxDocumentBytes,
+      long maxAttachmentBytes,
+      int maxConcurrentParses,
+      ExecutorService executor,
+      Duration idleTimeout) {
     this.maxDocumentBytes = maxDocumentBytes;
     this.maxAttachmentBytes = maxAttachmentBytes;
     this.maxConcurrentParses = maxConcurrentParses;
     this.parseSlots = new Semaphore(maxConcurrentParses);
     this.executor = executor;
+    this.idleTimeout = idleTimeout.compareTo(Duration.ofMillis(1)) < 0
+        ? Duration.ofMillis(1)
+        : idleTimeout;
+  }
+
+  private static ScheduledThreadPoolExecutor idleTimers() {
+    ScheduledThreadPoolExecutor timers = new ScheduledThreadPoolExecutor(
+        1, Thread.ofPlatform().name("grpc-email-idle-timer").daemon().factory());
+    // A frame that arrives in time cancels its timer; drop it from the queue
+    // then rather than thirty seconds later.
+    timers.setRemoveOnCancelPolicy(true);
+    return timers;
   }
 
   /** The lifetime counters this service keeps; the launcher reports them. */
@@ -307,6 +353,13 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
    * client's own send window. A cancelled call (the client gave up, or its
    * deadline passed) stops at the parser's next checkpoint and gives its slot
    * back.
+   *
+   * <p>Each frame the server asks for starts the idle clock; a client that
+   * sends nothing for the idle timeout is ended with DEADLINE_EXCEEDED and
+   * its slot freed. A call waiting for its slot is not timed, because nobody
+   * is reading it yet. The request callbacks and the timer share this
+   * object's monitor, so a timer never ends a call in the middle of taking a
+   * frame in.
    */
   private final class Upload implements StreamObserver<ParseEmailRequest> {
 
@@ -315,6 +368,10 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
     private final ServerCallStreamObserver<ParseEmailResponse> call;
     private final Buffer buffer = new Buffer();
     private final AtomicBoolean holdsSlot = new AtomicBoolean();
+
+    /** Counts frames taken in; a timer armed before the latest one is moot. */
+    private long frameGeneration;
+    private volatile ScheduledFuture<?> idleTimer;
 
     private ParseOptions options;
     private Sink sink;
@@ -342,13 +399,53 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
         call.setOnCancelHandler(this::cancel);
         call.disableAutoRequest();
         // The options message is read straight away; chunks wait for a slot.
+        armIdleTimer();
         call.request(1);
       }
       return this;
     }
 
+    /**
+     * Starts the idle clock on a frame the server is about to ask for. Only
+     * a transport has frames to ask for; a caller driving the service
+     * directly pushes them itself.
+     */
+    private synchronized void armIdleTimer() {
+      if (call == null) {
+        return;
+      }
+      long generation = frameGeneration;
+      ScheduledFuture<?> previous = idleTimer;
+      if (previous != null) {
+        previous.cancel(false);
+      }
+      idleTimer = IDLE_TIMERS.schedule(
+          () -> expire(generation), idleTimeout.toNanos(), TimeUnit.NANOSECONDS);
+    }
+
+    /** A frame came in, so whatever timer was waiting for it is moot. */
+    private synchronized void frameArrived() {
+      frameGeneration++;
+      ScheduledFuture<?> timer = idleTimer;
+      if (timer != null) {
+        timer.cancel(false);
+        idleTimer = null;
+      }
+    }
+
+    /** The idle timer fired: if the frame it was waiting for never came, the call ends. */
+    private synchronized void expire(long generation) {
+      if (generation != frameGeneration || aborted || cancelled || parseScheduled) {
+        return;
+      }
+      metrics.messageRejected();
+      abort(Status.DEADLINE_EXCEEDED.withDescription("no request frame arrived for "
+          + idleTimeout.toMillis() + " ms; a stalled upload may not hold a parse slot"));
+    }
+
     @Override
-    public void onNext(ParseEmailRequest request) {
+    public synchronized void onNext(ParseEmailRequest request) {
+      frameArrived();
       if (aborted || cancelled) {
         return;
       }
@@ -419,6 +516,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
             releaseSlot();
             return;
           }
+          armIdleTimer();
           call.request(1);
         });
       } catch (RejectedExecutionException shuttingDown) {
@@ -448,6 +546,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
     /** Asks the transport for the next message once this one is taken in. */
     private void requestNext() {
       if (call != null && !aborted && !cancelled) {
+        armIdleTimer();
         call.request(1);
       }
     }
@@ -531,7 +630,8 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
     }
 
     @Override
-    public void onCompleted() {
+    public synchronized void onCompleted() {
+      frameArrived();
       if (aborted || cancelled) {
         return;
       }
@@ -657,6 +757,10 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
       } finally {
         if (!parseScheduled) {
           releaseSlot();
+        }
+        ScheduledFuture<?> timer = idleTimer;
+        if (timer != null) {
+          timer.cancel(false);
         }
       }
     }
