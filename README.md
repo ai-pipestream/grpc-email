@@ -253,11 +253,21 @@ keeps its slot until its connection goes away.
 
 ## Tests
 
-`./gradlew test` runs 123 tests with no network and no committed binaries.
+`./gradlew test` runs 154 tests with no network and no committed binaries.
 Fixtures are authored in memory: Jakarta Mail writes the `.eml`, and
 `MsgFixtures` builds `.msg` bytes from the MS-OXMSG layout up (compound-file
 streams, property chunks, recipient and attachment storages, an uncompressed
 `PidTagRtfCompressed` stream), because POI can read `.msg` but not write one.
+`TnefFixtures` does the same for `winmail.dat`, from the MS-OXTNEF layout.
+
+Damaged and hostile input is written by hand: a base64 body or attachment
+cut short, an unknown transfer encoding, an unquoted filename, a multipart
+with no parts, nesting past the depth cap and past the scan budget, an
+overlong RTF parameter, and TNEF containers that are whole, cut short,
+unreadable or flooded with empty slots. `ServiceRobustnessTest` throws
+`Error`s onto the parse thread and cancels, expires and queues calls against
+a one-slot server, so a call that never ends or a slot that never comes back
+stalls the suite.
 
 The liveness assertions are load-bearing: one test half-uploads a message and
 requires the envelope to arrive before the rest is sent, another requires
