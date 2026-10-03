@@ -9,6 +9,7 @@ import ai.pipestream.email.parse.MsgParser;
 import ai.pipestream.email.parse.ParseCancelledException;
 import ai.pipestream.email.parse.ParseOptions;
 import ai.pipestream.email.parse.ParseSink;
+import ai.pipestream.email.parse.TnefRecordLimits;
 import ai.pipestream.email.parse.UnsupportedFormatException;
 import ai.pipestream.email.v1.Attachment;
 import ai.pipestream.email.v1.BodyPart;
@@ -159,6 +160,9 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
       Duration idleTimeout,
       Duration uploadTimeout) {
     this.maxDocumentBytes = maxDocumentBytes;
+    // A winmail.dat body may be as large as the message that carries it;
+    // POI's own 1 MB property ceiling would drop every body over that.
+    TnefRecordLimits.applyUploadCap(maxDocumentBytes);
     this.maxAttachmentBytes = maxAttachmentBytes;
     this.maxConcurrentParses = maxConcurrentParses;
     this.parseSlots = new Semaphore(maxConcurrentParses);
