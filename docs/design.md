@@ -89,6 +89,14 @@ all, and a stream cut short keeps what came before the cut. A container
 with no readable record is described as the opaque attachment it then is.
 Nothing found inside a container is unpacked again.
 
+POI refuses a whole MAPI property list when one property in it is over its
+per-property ceiling, which defaults to 1 MB, so an HTML or RTF body over
+1 MB would cost every body in the list. The service raises POI's
+per-property and per-record ceilings to its own upload cap
+(`GRPC_EMAIL_MAX_DOCUMENT_MIB`) when it starts: a body as large as the
+message that carries it is read, and a property claiming more than that is
+refused before anything is allocated for it.
+
 ## 4. Mapping to Document
 
 **Implemented in this repo** as `ai.pipestream.email.document.EmailDocumentFold`,

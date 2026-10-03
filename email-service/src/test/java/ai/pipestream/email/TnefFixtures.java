@@ -28,7 +28,9 @@ final class TnefFixtures {
   private static final int ATP_BYTE = 0x0006;
 
   /** MAPI property ids and types, as in MsgFixtures. */
+  private static final int PID_BODY = 0x1000;
   private static final int PID_RTF_COMPRESSED = 0x1009;
+  private static final int PID_BODY_HTML = 0x1013;
   private static final int PID_ATTACH_LONG_FILENAME = 0x3707;
   private static final int PID_ATTACH_MIME_TAG = 0x370E;
   private static final int PID_ATTACH_CONTENT_ID = 0x3712;
@@ -124,6 +126,48 @@ final class TnefFixtures {
     return stream.build();
   }
 
+  /**
+   * A container whose one MAPI property list carries a plain-text body and
+   * an HTML body, as Outlook stores them: the plain one as a Unicode string,
+   * the HTML one as bytes.
+   */
+  static byte[] plainAndHtmlBodies(String plain, String html) {
+    return new Stream()
+        .message(ATT_OEM_CODEPAGE, ATP_LONG, codePage(1252))
+        .message(ATT_MAPI_PROPS, ATP_BYTE, new Properties()
+            .unicode(PID_BODY, plain)
+            .binary(PID_BODY_HTML, html.getBytes(StandardCharsets.UTF_8))
+            .build())
+        .build();
+  }
+
+  /** A container whose only body is {@code rtf}, stored uncompressed. */
+  static byte[] rtfBody(String rtf) {
+    return new Stream()
+        .message(ATT_OEM_CODEPAGE, ATP_LONG, codePage(1252))
+        .message(ATT_MAPI_PROPS, ATP_BYTE, new Properties()
+            .binary(PID_RTF_COMPRESSED, uncompressedRtf(rtf))
+            .build())
+        .build();
+  }
+
+  /**
+   * A container whose property list holds a plain body and then an HTML
+   * body whose length field claims {@code claimed} bytes while four follow,
+   * then the {@link #winmailDat} attachments.
+   */
+  static byte[] htmlClaiming(String plain, int claimed) {
+    Properties properties = new Properties().unicode(PID_BODY, plain);
+    properties.claimed(TYPE_BINARY, PID_BODY_HTML, claimed, new byte[] {'<', 'p', '>', 'x'});
+    Stream stream = new Stream()
+        .message(ATT_OEM_CODEPAGE, ATP_LONG, codePage(1252))
+        .message(ATT_MAPI_PROPS, ATP_BYTE, properties.build())
+        .attachment(ATT_ATTACH_RENDER_DATA, ATP_BYTE, renderData())
+        .attachment(ATT_ATTACH_TITLE, ATP_STRING, (SEAL_NAME + "\0").getBytes(WINDOWS_1252))
+        .attachment(ATT_ATTACH_DATA, ATP_BYTE, SEAL_BYTES);
+    return stream.build();
+  }
+
   /** Bytes that carry the TNEF signature and nothing readable after it. */
   static byte[] signatureThenGarbage() {
     return new byte[] {0x78, (byte) 0x9F, 0x3E, 0x22, 0x01, 0x00, 0x07, 0x07, 0x07, 0x07};
@@ -187,10 +231,15 @@ final class TnefFixtures {
 
     /** Type, id, one value: its length, its bytes, padding to four bytes. */
     private Properties variable(int type, int id, byte[] value) {
+      return claimed(type, id, value.length, value);
+    }
+
+    /** As {@link #variable}, with a length field that need not match the bytes. */
+    private Properties claimed(int type, int id, int length, byte[] value) {
       out.writeBytes(uint16(type));
       out.writeBytes(uint16(id));
       out.writeBytes(uint32(1));
-      out.writeBytes(uint32(value.length));
+      out.writeBytes(uint32(length));
       out.writeBytes(value);
       out.writeBytes(new byte[(4 - value.length % 4) % 4]);
       count++;

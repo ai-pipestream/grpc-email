@@ -37,6 +37,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.poi.hmef.attribute.MAPIAttribute;
+import org.apache.poi.hmef.attribute.TNEFAttribute;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -771,6 +773,62 @@ class EmailParseServiceTest {
         .singleElement()
         .asString()
         .contains("20000 MAPI property record(s)");
+  }
+
+  @Test
+  @DisplayName("winmail.dat bodies over POI's 1 MB property default survive, up to the upload cap")
+  void largeTnefBodiesSurvive() throws Exception {
+    assertThat(MAPIAttribute.getMaxRecordLength())
+        .as("the service raised POI's per-property ceiling to its own upload cap")
+        .isEqualTo(MESSAGE_CAP);
+    assertThat(TNEFAttribute.getMaxRecordLength()).isEqualTo(MESSAGE_CAP);
+
+    String html = "<html><body>" + "<p>Hearing moved to Friday.</p>".repeat(50_000)
+        + "</body></html>";
+    assertThat(html.length()).isGreaterThan(1_400_000);
+    byte[] message = EmlFixtures.tnefOnly(
+        TnefFixtures.plainAndHtmlBodies(TnefFixtures.PLAIN_BODY, html));
+    assertThat((long) message.length).isLessThan(MESSAGE_CAP);
+    Result result = parseWhole(message, "eml-tnef-large-html");
+    assertThat(result.bodies())
+        .as("the HTML body over 1 MB and the plain body beside it in the same list")
+        .extracting(BodyPart::getPartId, BodyPart::getText)
+        .containsExactly(
+            org.assertj.core.groups.Tuple.tuple("1/body:plain", TnefFixtures.PLAIN_BODY),
+            org.assertj.core.groups.Tuple.tuple("1/body:html", html));
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_OK);
+
+    String words = "Hearing moved to Friday. ".repeat(48_000);
+    byte[] rtfOnly = EmlFixtures.tnefOnly(TnefFixtures.rtfBody(
+        "{\\rtf1\\ansi{\\fonttbl{\\f0 Arial;}}\\f0 " + words + "\\par}"));
+    Result rtf = parseWhole(rtfOnly, "eml-tnef-large-rtf");
+    assertThat(rtf.bodies())
+        .as("an RTF body over 1 MB is read and reduced to text")
+        .singleElement()
+        .satisfies(body -> {
+          assertThat(body.getPartId()).isEqualTo("1/body:rtf");
+          assertThat(body.getText()).isEqualTo(words.trim());
+        });
+  }
+
+  @Test
+  @DisplayName("a TNEF property claiming more than the upload cap is refused unread")
+  void tnefPropertyOverTheUploadCapIsRefused() throws Exception {
+    byte[] message = EmlFixtures.tnefOnly(
+        TnefFixtures.htmlClaiming(TnefFixtures.PLAIN_BODY, Integer.MAX_VALUE - 16));
+    Result result = parseWhole(message, "eml-tnef-hostile-length");
+    assertThat(result.bodies())
+        .as("POI refuses the list holding the oversized claim")
+        .isEmpty();
+    assertThat(result.attachments())
+        .as("the records after it are still read")
+        .extracting(Attachment::getFilename)
+        .containsExactly(TnefFixtures.SEAL_NAME);
+    assertThat(result.status().getWarningsList())
+        .filteredOn(warning -> warning.contains("could not be read"))
+        .singleElement()
+        .asString()
+        .contains("1 MAPI property record(s)");
   }
 
   @Test

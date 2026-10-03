@@ -163,7 +163,9 @@ an invented page number.
   (plain or HTML as stored, RTF reduced to plain text with a warning, part
   ids like `1.2/body:rtf`). The records are framed here and only the MAPI
   property lists go to POI's HMEF, so one damaged record costs only itself
-  and a container cut short keeps everything before the cut. Bytes that
+  and a container cut short keeps everything before the cut. POI's 1 MB
+  per-property ceiling is raised to the upload cap, so bodies over 1 MB
+  survive while a property claiming more than the cap is refused. Bytes that
   carry the signature but no readable record stay one opaque attachment,
   with a warning. Nothing inside a container is unpacked in turn.
 - **`.msg`**: POI `MAPIMessage`. Recipients are role-tagged from
@@ -273,7 +275,8 @@ Damaged and hostile input is written by hand: a base64 body or attachment
 cut short, an unknown transfer encoding, an unquoted filename, a multipart
 with no parts, nesting past the depth cap and past the scan budget, an
 overlong RTF parameter, and TNEF containers that are whole, cut short,
-unreadable or flooded with empty slots. `ServiceRobustnessTest` throws
+unreadable, flooded with empty slots, carrying HTML and RTF bodies over
+1 MB, or holding a property whose length claims more than the upload cap. `ServiceRobustnessTest` throws
 `Error`s onto the parse thread and cancels, expires, stalls and queues calls
 against a one-slot server, so a call that never ends or a slot that never
 comes back stalls the suite.

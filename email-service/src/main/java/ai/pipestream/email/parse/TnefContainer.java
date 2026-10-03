@@ -25,12 +25,19 @@ import org.apache.poi.hsmf.datatypes.MAPIProperty;
  *
  * <p>The stream is framed here, record by record (MS-OXTNEF 2.1.3), and only
  * the MAPI property lists inside it are decoded by Apache POI's HMEF. POI's
- * own reader is all or nothing: one record it cannot read (a compressed RTF
- * body over its 1 MB property cap, a stream cut short along with the base64
- * around it) throws away every attachment. Framed here, a damaged record
- * costs only itself, and a stream cut short keeps everything before the cut.
+ * own reader is all or nothing: one record it cannot read (a stream cut short
+ * along with the base64 around it, a property list with one damaged entry)
+ * throws away every attachment. Framed here, a damaged record costs only
+ * itself, and a stream cut short keeps everything before the cut.
  * Attachment data is sliced straight out of the stream, so no per-record cap
- * applies beyond the message's own.
+ * applies to it beyond the message's own.
+ *
+ * <p>A property list still reaches POI whole, and POI refuses the whole list
+ * when one property in it is over its per-property ceiling, losing every body
+ * the list carries. POI's default ceiling is 1 MB, below real HTML and RTF
+ * bodies, so the service raises it to its own upload cap
+ * ({@link TnefRecordLimits}): a body as large as the message that carries it
+ * is read, and a property claiming more than that is refused unread.
  *
  * <p>Nothing is recursed into: an attachment inside the container that is
  * itself TNEF, or an embedded message, is described rather than unpacked.
