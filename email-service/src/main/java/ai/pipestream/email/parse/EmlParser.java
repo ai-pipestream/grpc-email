@@ -3,7 +3,6 @@ package ai.pipestream.email.parse;
 import ai.pipestream.email.v1.Attachment;
 import ai.pipestream.email.v1.BodyMediaType;
 import ai.pipestream.email.v1.BodyPart;
-import com.google.protobuf.ByteString;
 import jakarta.mail.Message;
 import jakarta.mail.MessagingException;
 import jakarta.mail.Part;
@@ -102,11 +101,16 @@ public final class EmlParser {
         new WalkState((long) MAX_MULTIPART_SCAN_FACTOR * bytes.length));
   }
 
-  /** What the recursive walk carries: the attachment index and its scan budget. */
+  /**
+   * What the recursive walk carries: the attachment index, the scan budget,
+   * and whether a body has gone out yet (a TNEF container's body is used
+   * only when the message has none of its own).
+   */
   private static final class WalkState {
     private final long scanBudget;
     private long scanned;
     private int attachments;
+    private boolean bodyEmitted;
 
     private WalkState(long scanBudget) {
       this.scanBudget = scanBudget;
@@ -159,7 +163,7 @@ public final class EmlParser {
             "unreadable multipart at " + path + ": " + broken.getMessage(), broken);
       }
       if (count == 0) {
-        emitPreamble(part, multipart, path, sink);
+        emitPreamble(part, multipart, path, sink, state);
         return;
       }
       for (int index = 0; index < count; index++) {
@@ -223,7 +227,7 @@ public final class EmlParser {
    * there is, so it is kept as a plain body rather than dropped.
    */
   private static void emitPreamble(
-      Part part, MimeMultipart multipart, String path, ParseSink sink) {
+      Part part, MimeMultipart multipart, String path, ParseSink sink, WalkState state) {
     String preamble;
     try {
       preamble = multipart.getPreamble();
@@ -245,6 +249,7 @@ public final class EmlParser {
             .setText(decoded.text().strip())
             .setCharset(decoded.charset())
             .build());
+    state.bodyEmitted = true;
   }
 
   /** Bytes with no declared charset: UTF-8 when they are valid UTF-8, else ISO-8859-1. */
@@ -268,6 +273,7 @@ public final class EmlParser {
 
     if (textual && !forcedAttachment && filename.isEmpty()) {
       emitBody(part, path, baseType, contentType, sink);
+      state.bodyEmitted = true;
       return;
     }
     if (baseType.equals("message/rfc822")) {
@@ -303,6 +309,19 @@ public final class EmlParser {
       ParseSink sink,
       WalkState state) {
     byte[] payload = payload(part, path, sink);
+    if (TnefContainer.isTnef(payload)) {
+      // A winmail.dat is a container, not an attachment anyone can open:
+      // its attachments, and its body when the message has none, take its
+      // place. Detected by signature, whatever the part was labelled.
+      TnefContainer.Unpacked unpacked = TnefContainer.unpack(
+          payload, path, !state.bodyEmitted, options, sink, () -> state.attachments++);
+      if (unpacked.readable()) {
+        state.bodyEmitted |= unpacked.emittedBody();
+        return;
+      }
+      sink.warn("part " + path + " is a TNEF (winmail.dat) container that could not be"
+          + " unpacked; emitted as an opaque attachment");
+    }
     int index = state.attachments++;
     if (filename.isEmpty()) {
       sink.warn("attachment " + index + " at part " + path + " has no filename");
@@ -315,14 +334,7 @@ public final class EmlParser {
         .setSizeBytes(payload.length)
         .setContentId(HeaderProjection.stripAngles(header(part, "Content-ID", "")))
         .setInline(Part.INLINE.equalsIgnoreCase(disposition));
-    if (options.includeAttachmentBytes()) {
-      if (payload.length <= options.maxAttachmentBytes()) {
-        attachment.setData(ByteString.copyFrom(payload));
-      } else {
-        sink.warn("attachment " + index + " (" + payload.length
-            + " bytes) exceeds the per-attachment cap; described without its bytes");
-      }
-    }
+    options.attachPayload(attachment, payload, sink);
     sink.attachment(attachment.build());
   }
 

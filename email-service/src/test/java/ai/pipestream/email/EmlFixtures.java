@@ -249,6 +249,32 @@ final class EmlFixtures {
     return bytes(message);
   }
 
+  /**
+   * A rich-text Outlook message as it reaches internet mail: a plain-text
+   * rendering of the body, with the real body and the attachments packed
+   * into a winmail.dat beside it.
+   */
+  static byte[] withWinmailDat(byte[] tnef) throws Exception {
+    MimeMessage message = envelope();
+    MimeBodyPart body = new MimeBodyPart();
+    body.setText(PLAIN_BODY, "UTF-8");
+    MimeBodyPart winmail = new MimeBodyPart();
+    winmail.setDataHandler(new DataHandler(new ByteArrayDataSource(tnef, "application/ms-tnef")));
+    winmail.setFileName("winmail.dat");
+    MimeMultipart mixed = new MimeMultipart("mixed");
+    mixed.addBodyPart(body);
+    mixed.addBodyPart(winmail);
+    message.setContent(mixed);
+    return bytes(message);
+  }
+
+  /** A message that is nothing but a TNEF container, as Exchange sends some. */
+  static byte[] tnefOnly(byte[] tnef) throws Exception {
+    MimeMessage message = envelope();
+    message.setDataHandler(new DataHandler(new ByteArrayDataSource(tnef, "application/ms-tnef")));
+    return bytes(message);
+  }
+
   /** An attachment part with no filename, which must warn rather than fail. */
   static byte[] unnamedAttachment() throws Exception {
     MimeMessage message = envelope();

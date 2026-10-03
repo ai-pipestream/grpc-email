@@ -127,7 +127,8 @@ becomes one `TextItem` per blank-line-separated paragraph, tagged with its
 `attachments`, one line per attachment. An inline image (`inline`, `image/*`,
 with a content id) becomes a `PictureItem` whose `ImageRef.uri` is
 **`part:<part_id>`**, a pointer into the typed stream you are already reading
-(`part:1.3` for a MIME path, `part:attach:1` for a MAPI storage). Bytes are
+(`part:1.3` for a MIME path, `part:attach:1` for a MAPI storage,
+`part:1.2/attach:0` for an attachment unpacked from a winmail.dat). Bytes are
 never embedded: a Document is one gRPC message, and attachment payloads
 belong on `Attachment.data`.
 
@@ -153,6 +154,17 @@ an invented page number.
   multipart bytes (Jakarta Mail rescans each level to find its boundaries);
   a subtree past either bound is emitted whole, as one opaque attachment,
   with a warning.
+- **TNEF (`winmail.dat`, `application/ms-tnef`)**, in either format: an
+  attachment whose bytes carry the TNEF signature is unpacked, whatever it
+  was labelled. The attachments inside it take its place, named under the
+  container's part path (`1.2/attach:0`, or `attach:3/attach:0` inside a
+  `.msg`); its body is used only when the message has none of its own
+  (plain or HTML as stored, RTF reduced to plain text with a warning, part
+  ids like `1.2/body:rtf`). The records are framed here and only the MAPI
+  property lists go to POI's HMEF, so one damaged record costs only itself
+  and a container cut short keeps everything before the cut. Bytes that
+  carry the signature but no readable record stay one opaque attachment,
+  with a warning. Nothing inside a container is unpacked in turn.
 - **`.msg`**: POI `MAPIMessage`. Recipients are role-tagged from
   `PidTagRecipientType` (1 to / 2 cc / 3 bcc). Bodies come from `PidTagBody`
   and `PidTagHtml`; HTML wins over RTF, and an RTF-only message gets
