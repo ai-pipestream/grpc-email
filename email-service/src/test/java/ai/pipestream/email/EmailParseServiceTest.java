@@ -2,6 +2,7 @@ package ai.pipestream.email;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import ai.pipestream.email.parse.EmlParser;
 import ai.pipestream.email.server.EmailParseServiceImpl;
 import ai.pipestream.email.v1.Address;
 import ai.pipestream.email.v1.AddressRole;
@@ -534,6 +535,79 @@ class EmailParseServiceTest {
     assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
     assertThat(result.status().getWarningsList())
         .anyMatch(warning -> warning.contains("carries no parts"));
+  }
+
+  // --- hostile structure --------------------------------------------------
+
+  /** Filler that makes a short nesting chain small next to its message. */
+  private static final int FILLER_BYTES = 64 * 1024;
+
+  @Test
+  @DisplayName("nesting within the cap is walked to the bottom")
+  void nestingWithinTheCapIsWalked() throws Exception {
+    // The root and this chain are exactly MAX_MULTIPART_DEPTH multiparts
+    // deep, the most the walk descends: nothing is refused.
+    int levels = EmlParser.MAX_MULTIPART_DEPTH - 1;
+    Result result = parseWhole(EmlFixtures.nestedMultiparts(levels, FILLER_BYTES), "eml-nest-ok");
+    assertThat(result.bodies()).hasSize(2);
+    assertThat(result.bodies().get(1).getText()).isEqualTo("the bottom");
+    assertThat(result.attachments()).isEmpty();
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_OK);
+  }
+
+  @Test
+  @DisplayName("nesting past the depth cap is cut off with a warning, not a crash")
+  void nestingPastTheDepthCapIsCutOff() throws Exception {
+    int levels = EmlParser.MAX_MULTIPART_DEPTH + 8;
+    Result result = parseWhole(EmlFixtures.nestedMultiparts(levels, FILLER_BYTES), "eml-nest-cap");
+    assertThat(result.bodies())
+        .as("the parts above the cut still stream; the bottom is inside the cut subtree")
+        .hasSize(1);
+    assertThat(result.bodies().get(0).getText()).startsWith(EmlFixtures.PLAIN_BODY_ASCII);
+    assertThat(result.attachments()).hasSize(1);
+    Attachment subtree = result.attachments().get(0);
+    assertThat(subtree.getContentType()).isEqualTo("multipart/mixed");
+    assertThat(subtree.getPartId())
+        .as("the first multipart past the cap is the one handed over whole")
+        .isEqualTo("1.2" + ".1".repeat(EmlParser.MAX_MULTIPART_DEPTH - 1));
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
+    assertThat(result.status().getWarningsList())
+        .anyMatch(warning -> warning.contains(
+            "nests multiparts deeper than " + EmlParser.MAX_MULTIPART_DEPTH + " levels"));
+  }
+
+  @Test
+  @DisplayName("a megabyte of full-size nesting stops at the scan budget, quickly")
+  void fullSizeNestingStopsAtTheScanBudget() throws Exception {
+    // About sixty bytes a level: a megabyte of nesting used to burn twelve
+    // seconds of CPU rescanning each level and end in a StackOverflowError
+    // reported as INTERNAL.
+    byte[] message = EmlFixtures.nestedMultiparts(20_000, 0);
+    assertThat(message.length).isGreaterThan(1_000_000).isLessThan((int) MESSAGE_CAP);
+
+    long started = System.nanoTime();
+    Result result = parse(message, listing("eml-nest-deep"), 64 * 1024);
+    long elapsedMillis = (System.nanoTime() - started) / 1_000_000;
+
+    assertThat(result.error()).as("over-deep nesting is degraded, never a fault").isNull();
+    assertThat(result.bodies())
+        .as("the parts above the cut still stream")
+        .extracting(BodyPart::getText)
+        .containsExactly(EmlFixtures.PLAIN_BODY_ASCII);
+    assertThat(result.attachments()).hasSize(1);
+    Attachment subtree = result.attachments().get(0);
+    assertThat(subtree.getContentType()).isEqualTo("multipart/mixed");
+    assertThat(subtree.getSizeBytes())
+        .as("the cut subtree's bytes are kept, not dropped")
+        .isGreaterThan(1_000_000);
+    assertThat(subtree.getPartId().split("\\.").length)
+        .as("each level of this chain is nearly the whole message, so the budget cuts it early")
+        .isLessThanOrEqualTo(EmlParser.MAX_MULTIPART_SCAN_FACTOR + 1);
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
+    assertThat(result.status().getWarningsList())
+        .anyMatch(warning -> warning.contains("would take the multipart scan past "
+            + EmlParser.MAX_MULTIPART_SCAN_FACTOR + " times the message's size"));
+    assertThat(elapsedMillis).isLessThan(10_000);
   }
 
   @Test

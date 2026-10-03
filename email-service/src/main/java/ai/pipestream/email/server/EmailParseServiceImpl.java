@@ -296,13 +296,20 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
       if (aborted) {
         return;
       }
-      switch (request.getPayloadCase()) {
-        case OPTIONS -> onOptions(request.getOptions());
-        case CHUNK -> onChunk(request.getChunk().getData(), request.getChunk().getComplete());
-        case PAYLOAD_NOT_SET -> abort(Status.INVALID_ARGUMENT
-            .withDescription("request message carries neither options nor a chunk"));
-        default -> abort(Status.INVALID_ARGUMENT
-            .withDescription("unrecognized request payload"));
+      try {
+        switch (request.getPayloadCase()) {
+          case OPTIONS -> onOptions(request.getOptions());
+          case CHUNK -> onChunk(request.getChunk().getData(), request.getChunk().getComplete());
+          case PAYLOAD_NOT_SET -> abort(Status.INVALID_ARGUMENT
+              .withDescription("request message carries neither options nor a chunk"));
+          default -> abort(Status.INVALID_ARGUMENT
+              .withDescription("unrecognized request payload"));
+        }
+      } catch (Throwable failure) {
+        // The envelope is projected on this thread as the header block
+        // lands, so header parsing can fail here; the call still ends with
+        // a status rather than whatever gRPC makes of an escaped throwable.
+        fail(failure);
       }
     }
 
@@ -439,18 +446,42 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
         sink.trailer(bytes);
         responses.onCompleted();
         metrics.messageParsed();
-      } catch (UnsupportedFormatException unsupported) {
-        metrics.messageRejected();
-        abort(Status.UNIMPLEMENTED.withDescription(unsupported.getMessage()));
-      } catch (InvalidEmailException invalid) {
-        metrics.messageRejected();
-        abort(Status.INVALID_ARGUMENT.withDescription(invalid.getMessage()));
-      } catch (Exception fault) {
-        metrics.messageFailed();
-        abort(Status.INTERNAL.withDescription("parser fault: " + fault));
+      } catch (Throwable failure) {
+        // Throwable, not Exception: a StackOverflowError or an
+        // OutOfMemoryError escaping this virtual thread would leave the
+        // call open until the client's deadline, holding nothing but still
+        // never answered.
+        fail(failure);
       } finally {
         parseSlots.release();
       }
+    }
+
+    /**
+     * Ends the call with the status a failure maps to, and counts it. Bad
+     * input is the caller's to fix and is counted as rejected; anything
+     * this server did not anticipate is INTERNAL.
+     */
+    private void fail(Throwable failure) {
+      Status status = switch (failure) {
+        case UnsupportedFormatException unsupported ->
+            Status.UNIMPLEMENTED.withDescription(unsupported.getMessage());
+        case InvalidEmailException invalid ->
+            Status.INVALID_ARGUMENT.withDescription(invalid.getMessage());
+        // The walk caps its own nesting, so this is a library recursing on
+        // hostile structure: still the input's doing.
+        case StackOverflowError tooDeep ->
+            Status.INVALID_ARGUMENT.withDescription("message structure is nested too deeply to parse");
+        case OutOfMemoryError exhausted -> Status.RESOURCE_EXHAUSTED.withDescription(
+            "message needs more memory than this server can give one parse");
+        default -> Status.INTERNAL.withDescription("parser fault: " + failure);
+      };
+      if (status.getCode() == Status.Code.INTERNAL) {
+        metrics.messageFailed();
+      } else {
+        metrics.messageRejected();
+      }
+      abort(status);
     }
 
     /**
@@ -484,7 +515,12 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
         return;
       }
       aborted = true;
-      responses.onError(status.asRuntimeException());
+      try {
+        responses.onError(status.asRuntimeException());
+      } catch (RuntimeException alreadyClosed) {
+        // The call ended underneath us (the client went away); there is
+        // nobody left to tell, and nothing more to do.
+      }
     }
   }
 }

@@ -60,6 +60,24 @@ public final class EmlParser {
    */
   private static final Properties LENIENT = lenientProperties();
 
+  /**
+   * How many multiparts deep the walk descends. Real mail nests a handful
+   * (mixed, related, alternative, perhaps a signed wrapper around them);
+   * thirty-two leaves room for any mailer's habits while bounding the
+   * recursion.
+   */
+  public static final int MAX_MULTIPART_DEPTH = 32;
+
+  /**
+   * How many times over the message's own size the walk will scan multipart
+   * content. Jakarta Mail rescans every byte of a multipart to find its
+   * boundaries, so each level of nesting costs another pass over everything
+   * below it: thirty-two full-size levels turned a 64 MiB message into a
+   * quarter of a minute of CPU. Real structures (a signed wrapper around
+   * mixed around related around alternative) stay well under this.
+   */
+  public static final int MAX_MULTIPART_SCAN_FACTOR = 8;
+
   private EmlParser() {}
 
   private static Properties lenientProperties() {
@@ -78,18 +96,56 @@ public final class EmlParser {
       throw new InvalidEmailException(
           "unreadable RFC 822 message: " + unreadable.getMessage(), unreadable);
     }
-    Counter attachments = new Counter();
-    walk(message, "1", options, sink, attachments);
+    walk(message, "1", 1, options, sink,
+        new WalkState((long) MAX_MULTIPART_SCAN_FACTOR * bytes.length));
   }
 
-  /** Mutable attachment index, threaded through the recursive walk. */
-  private static final class Counter {
-    private int value;
+  /** What the recursive walk carries: the attachment index and its scan budget. */
+  private static final class WalkState {
+    private final long scanBudget;
+    private long scanned;
+    private int attachments;
+
+    private WalkState(long scanBudget) {
+      this.scanBudget = scanBudget;
+    }
+
+    /** Charges a multipart's bytes to the budget, or refuses when they do not fit. */
+    private boolean admitScan(long bytes) {
+      if (scanned + bytes > scanBudget) {
+        return false;
+      }
+      scanned += bytes;
+      return true;
+    }
   }
 
+  /**
+   * One step of the MIME walk; {@code depth} is how many parts deep this one
+   * sits, the root being 1. Only multipart nesting recurses: a nested
+   * message/rfc822 is handed over whole as an attachment and never walked.
+   */
   private static void walk(
-      Part part, String path, ParseOptions options, ParseSink sink, Counter attachments) {
+      Part part, String path, int depth, ParseOptions options, ParseSink sink,
+      WalkState state) {
     if (isMultipart(part)) {
+      // A megabyte of input nests thousands of multiparts deep, and every
+      // level rescans the bytes below it before the recursion ends in a
+      // StackOverflowError. Past either bound the subtree is kept, whole and
+      // unwalked, as the bytes of one attachment.
+      String refusal = depth > MAX_MULTIPART_DEPTH
+          ? "nests multiparts deeper than " + MAX_MULTIPART_DEPTH + " levels"
+          : !state.admitScan(size(part))
+              ? "would take the multipart scan past " + MAX_MULTIPART_SCAN_FACTOR
+                  + " times the message's size"
+              : null;
+      if (refusal != null) {
+        sink.warn("part " + path + " " + refusal
+            + "; its subtree was emitted as one opaque attachment rather than walked");
+        emitAttachment(part, path, HeaderProjection.baseType(header(part, "Content-Type", "")),
+            filename(part), disposition(part), options, sink, state);
+        return;
+      }
       MimeMultipart multipart;
       int count;
       try {
@@ -105,14 +161,24 @@ public final class EmlParser {
       }
       for (int index = 0; index < count; index++) {
         try {
-          walk(multipart.getBodyPart(index), path + "." + (index + 1), options, sink, attachments);
+          walk(multipart.getBodyPart(index), path + "." + (index + 1), depth + 1, options, sink,
+              state);
         } catch (MessagingException broken) {
           sink.warn("part " + path + "." + (index + 1) + " skipped: " + broken.getMessage());
         }
       }
       return;
     }
-    emitLeaf(part, path, options, sink, attachments);
+    emitLeaf(part, path, options, sink, state);
+  }
+
+  /** A part's content size in bytes, or 0 when Jakarta Mail cannot tell. */
+  private static long size(Part part) {
+    try {
+      return Math.max(0, part.getSize());
+    } catch (MessagingException unknown) {
+      return 0;
+    }
   }
 
   /**
@@ -189,7 +255,7 @@ public final class EmlParser {
   }
 
   private static void emitLeaf(
-      Part part, String path, ParseOptions options, ParseSink sink, Counter attachments) {
+      Part part, String path, ParseOptions options, ParseSink sink, WalkState state) {
     String contentType = header(part, "Content-Type", "text/plain");
     String baseType = HeaderProjection.baseType(contentType);
     String disposition = disposition(part);
@@ -205,7 +271,7 @@ public final class EmlParser {
       sink.warn("part " + path
           + " is a nested message/rfc822; emitted as an attachment for the coordinator to reparse");
     }
-    emitAttachment(part, path, baseType, filename, disposition, options, sink, attachments);
+    emitAttachment(part, path, baseType, filename, disposition, options, sink, state);
   }
 
   private static void emitBody(
@@ -232,9 +298,9 @@ public final class EmlParser {
       String disposition,
       ParseOptions options,
       ParseSink sink,
-      Counter attachments) {
+      WalkState state) {
     byte[] payload = payload(part, path, sink);
-    int index = attachments.value++;
+    int index = state.attachments++;
     if (filename.isEmpty()) {
       sink.warn("attachment " + index + " at part " + path + " has no filename");
     }

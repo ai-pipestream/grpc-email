@@ -81,10 +81,15 @@ advertisement the demo shell reads to build its tab bar.
 
 | Code | Cause |
 |---|---|
-| `INVALID_ARGUMENT` | no bytes, no `complete` chunk, a chunk before options, repeated options, headers that never ended, a corrupt or truncated container |
+| `INVALID_ARGUMENT` | no bytes, no `complete` chunk, a chunk before options, repeated options, headers that never ended, a corrupt or truncated container, structure nested too deeply for a parsing library to follow |
 | `UNIMPLEMENTED` | bytes are not email (including an OLE2 file that is not MAPI) |
-| `RESOURCE_EXHAUSTED` | over the effective byte cap |
+| `RESOURCE_EXHAUSTED` | over the effective byte cap, or a parse that ran out of memory |
 | `INTERNAL` | unexpected parser fault |
+
+Every call ends with a status: an `Error` thrown mid-parse (a
+`StackOverflowError`, an `OutOfMemoryError`) is mapped like any other
+failure instead of escaping the parse thread and leaving the client to wait
+for its deadline.
 
 `grpc.health.v1.Health` and server reflection (v1 and v1alpha) are registered.
 
@@ -143,7 +148,11 @@ an invented page number.
   `STATE_PARTIAL` warning naming what was repaired. Encoded words decode even
   when a mailer glued them to the surrounding text, an unquoted filename with
   spaces survives the strict parameter grammar, and a multipart that carries
-  no parts keeps its text as a plain body.
+  no parts keeps its text as a plain body. Multipart nesting is walked at most
+  32 levels deep and over at most eight times the message's size in
+  multipart bytes (Jakarta Mail rescans each level to find its boundaries);
+  a subtree past either bound is emitted whole, as one opaque attachment,
+  with a warning.
 - **`.msg`**: POI `MAPIMessage`. Recipients are role-tagged from
   `PidTagRecipientType` (1 to / 2 cc / 3 bcc). Bodies come from `PidTagBody`
   and `PidTagHtml`; HTML wins over RTF, and an RTF-only message gets

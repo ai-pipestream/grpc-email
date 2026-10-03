@@ -99,8 +99,10 @@ gRPC status, never a 200 with a partial lie:
 
 - `INVALID_ARGUMENT`: no bytes, truncated MIME, missing complete flag
 - `UNIMPLEMENTED`: not email
-- `RESOURCE_EXHAUSTED`: over the byte cap
+- `RESOURCE_EXHAUSTED`: over the byte cap, or out of memory mid-parse
 - `INTERNAL`: parser fault
+
+Every call ends with one of these, whatever the parse throws.
 
 A failed collector is a `CollectorFailure` on the gRParse stream. It
 does not fail the parse while another collector succeeds.

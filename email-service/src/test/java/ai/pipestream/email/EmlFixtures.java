@@ -199,6 +199,37 @@ final class EmlFixtures {
         + PLAIN_BODY_ASCII + "\r\n").getBytes(StandardCharsets.US_ASCII);
   }
 
+  /**
+   * A message whose second part opens a chain of {@code levels} multiparts,
+   * each nothing but the next, with one text part at the bottom. A level
+   * costs about sixty bytes, which is what makes nesting cheap to send and
+   * expensive to walk. The first part is plain text padded with {@code
+   * fillerBytes} of filler, so a test can make the chain small or large next
+   * to the message around it.
+   */
+  static byte[] nestedMultiparts(int levels, int fillerBytes) {
+    StringBuilder message = new StringBuilder(levels * 64 + fillerBytes + 512)
+        .append(handWrittenHeaders("nested " + levels))
+        .append("Content-Type: multipart/mixed; boundary=\"b0\"\r\n\r\n")
+        .append("--b0\r\nContent-Type: text/plain; charset=us-ascii\r\n\r\n")
+        .append(PLAIN_BODY_ASCII).append("\r\n");
+    while (fillerBytes > 0) {
+      String line = "filler filler filler filler filler filler filler filler filler\r\n";
+      message.append(line);
+      fillerBytes -= line.length();
+    }
+    message.append("--b0\r\n");
+    for (int level = 1; level <= levels; level++) {
+      message.append("Content-Type: multipart/mixed; boundary=\"b").append(level).append("\"\r\n\r\n")
+          .append("--b").append(level).append("\r\n");
+    }
+    message.append("Content-Type: text/plain; charset=us-ascii\r\n\r\nthe bottom\r\n");
+    for (int level = levels; level >= 0; level--) {
+      message.append("--b").append(level).append("--\r\n");
+    }
+    return message.toString().getBytes(StandardCharsets.US_ASCII);
+  }
+
   /** An attachment part with no filename, which must warn rather than fail. */
   static byte[] unnamedAttachment() throws Exception {
     MimeMessage message = envelope();
