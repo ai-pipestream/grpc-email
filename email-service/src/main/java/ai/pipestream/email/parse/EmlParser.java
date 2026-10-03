@@ -376,10 +376,8 @@ public final class EmlParser {
       throw new InvalidEmailException(
           "unreadable body at part " + path + ": " + unreadable.getMessage(), unreadable);
     }
-    if (!recovered.damage().isEmpty()) {
-      sink.warn("part " + path + " has a " + recovered.damage()
-          + "; the text that decoded was kept");
-    }
+    recovered.damage().ifPresent(damage ->
+        sink.warn("part " + path + " has a " + damage + "; the text that decoded was kept"));
     Charset charset = charset(declaredCharset);
     if (charset == null) {
       sink.warn("part " + path + " declared charset '" + declaredCharset
@@ -410,8 +408,8 @@ public final class EmlParser {
       try {
         TransferDecoding.Recovered recovered = TransferDecoding.recover(part);
         sink.warn("attachment payload at part " + path + " has a "
-            + (recovered.damage().isEmpty() ? "transfer encoding Jakarta Mail refused ("
-                + refused.getMessage() + ")" : recovered.damage())
+            + recovered.damage().orElse("transfer encoding Jakarta Mail refused ("
+                + refused.getMessage() + ")")
             + "; kept the " + recovered.bytes().length + " bytes that decoded");
         return recovered.bytes();
       } catch (IOException | MessagingException unreadable) {

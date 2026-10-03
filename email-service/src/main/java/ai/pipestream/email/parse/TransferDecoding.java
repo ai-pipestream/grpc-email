@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 import org.eclipse.angus.mail.util.UUDecoderStream;
 
 /**
@@ -38,11 +39,22 @@ final class TransferDecoding {
    * What could be recovered from one part.
    *
    * @param bytes the decoded payload, as much of it as survived
-   * @param damage what was wrong with the encoding, or empty when the
+   * @param damage what was wrong with the encoding; absent when the
    *     encoding itself was sound (the strict failure lay elsewhere, for
    *     example in the charset)
    */
-  record Recovered(byte[] bytes, String damage) {}
+  record Recovered(byte[] bytes, Optional<String> damage) {
+
+    /** Bytes whose encoding was sound. */
+    static Recovered sound(byte[] bytes) {
+      return new Recovered(bytes, Optional.empty());
+    }
+
+    /** Bytes that survived a damaged encoding, and what the damage was. */
+    static Recovered damaged(byte[] bytes, String damage) {
+      return new Recovered(bytes, Optional.of(damage));
+    }
+  }
 
   /** Base64 alphabet value per byte; {@link #NOT_BASE64} or {@link #PAD} otherwise. */
   private static final byte[] BASE64_VALUES = base64Values();
@@ -75,11 +87,11 @@ final class TransferDecoding {
       raw = stream.readAllBytes();
     }
     return switch (encoding) {
-      case "", "7bit", "8bit", "binary" -> new Recovered(raw, "");
+      case "", "7bit", "8bit", "binary" -> Recovered.sound(raw);
       case "base64" -> base64(raw);
       case "quoted-printable" -> quotedPrintable(raw);
       case "uuencode", "x-uuencode", "x-uue" -> uudecode(raw);
-      default -> new Recovered(raw, "unknown Content-Transfer-Encoding '" + encoding
+      default -> Recovered.damaged(raw, "unknown Content-Transfer-Encoding '" + encoding
           + "'; the bytes were kept undecoded");
     };
   }
@@ -146,8 +158,10 @@ final class TransferDecoding {
     if (resumed) {
       damage.add("data resumes after padding");
     }
-    return new Recovered(out.toByteArray(),
-        damage.isEmpty() ? "" : "damaged base64 (" + String.join("; ", damage) + ")");
+    return damage.isEmpty()
+        ? Recovered.sound(out.toByteArray())
+        : Recovered.damaged(out.toByteArray(),
+            "damaged base64 (" + String.join("; ", damage) + ")");
   }
 
   /** The bytes a group of two or three base64 characters fully determines. */
@@ -164,7 +178,7 @@ final class TransferDecoding {
   private static Recovered quotedPrintable(byte[] raw) throws MessagingException, IOException {
     try (InputStream decoded =
              MimeUtility.decode(new ByteArrayInputStream(raw), "quoted-printable")) {
-      return new Recovered(decoded.readAllBytes(), "");
+      return Recovered.sound(decoded.readAllBytes());
     }
   }
 
@@ -176,11 +190,11 @@ final class TransferDecoding {
    */
   private static Recovered uudecode(byte[] raw) throws IOException {
     try (InputStream strict = new UUDecoderStream(new ByteArrayInputStream(raw), false, false)) {
-      return new Recovered(strict.readAllBytes(), "");
+      return Recovered.sound(strict.readAllBytes());
     } catch (IOException malformed) {
       try (InputStream tolerant =
                new UUDecoderStream(new ByteArrayInputStream(raw), true, true)) {
-        return new Recovered(tolerant.readAllBytes(),
+        return Recovered.damaged(tolerant.readAllBytes(),
             "damaged uuencoding (" + malformed.getMessage() + ")");
       }
     }
