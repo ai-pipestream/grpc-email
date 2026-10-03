@@ -35,9 +35,9 @@ service EmailParseService {
   // Errors: no bytes, a truncated message, or a stream that ended without a
   // chunk marked complete is INVALID_ARGUMENT; bytes that are not an email
   // this server understands are UNIMPLEMENTED; input above the byte cap, or a
-  // parse that runs out of memory, is RESOURCE_EXHAUSTED; a client that sends
-  // nothing for the server's idle timeout while the server waits for its next
-  // message is DEADLINE_EXCEEDED; an unexpected parser fault is INTERNAL. A
+  // parse that runs out of memory, is RESOURCE_EXHAUSTED; an upload that makes
+  // no progress for the server's idle timeout (an empty chunk is none) is
+  // DEADLINE_EXCEEDED; an unexpected parser fault is INTERNAL. A
   // stream may carry events before it fails; the status is the authority on
   // success.
   rpc ParseEmail(stream ParseEmailRequest) returns (stream ParseEmailResponse);

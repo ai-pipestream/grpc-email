@@ -350,11 +350,34 @@ class ServiceRobustnessTest {
     Call stalled = Call.start(stub()).chunk(message, 0, headerEnd, false).await();
     assertThat(stalled.code()).isEqualTo(Status.Code.DEADLINE_EXCEEDED);
     assertThat(Status.fromThrowable(stalled.failure.get()).getDescription())
-        .contains("no request frame arrived for 500 ms");
+        .contains("the upload made no progress for 500 ms");
 
     Call next = Call.start(stub()).finishUpload(message, 0).await();
     assertThat(next.completed).as("the stalled call gave its slot back").isTrue();
     assertThat(service.metrics().render()).contains("rejected=1,");
+  }
+
+  @Test
+  @DisplayName("a trickle of empty chunks is not progress: the call still times out")
+  void emptyChunksDoNotKeepAStalledUploadAlive() throws Exception {
+    startOneSlotServer(SHORT_IDLE);
+    byte[] message = EmlFixtures.plainText();
+    int headerEnd = EmlFixtures.headerBlockEnd(message);
+
+    // A frame every 100 ms, five to an idle timeout, none of them carrying
+    // a byte: without a progress rule this held the only slot forever.
+    Call stalled = Call.start(stub()).chunk(message, 0, headerEnd, false);
+    for (int step = 0; step < 30 && stalled.done.getCount() > 0; step++) {
+      Thread.sleep(100);
+      stalled.chunk(message, headerEnd, headerEnd, false);
+    }
+    assertThat(stalled.done.getCount())
+        .as("the call ended while the empty chunks were still coming, six idle timeouts in")
+        .isZero();
+    assertThat(stalled.code()).isEqualTo(Status.Code.DEADLINE_EXCEEDED);
+
+    Call next = Call.start(stub()).finishUpload(message, 0).await();
+    assertThat(next.completed).as("the stalled call gave its slot back").isTrue();
   }
 
   @Test

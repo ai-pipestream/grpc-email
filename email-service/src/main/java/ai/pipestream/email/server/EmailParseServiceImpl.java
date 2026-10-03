@@ -74,7 +74,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
   private static final long MIB = 1024L * 1024L;
 
   /**
-   * Longest the server waits for a request frame it has asked for, as in the
+   * Longest the server waits for an upload to make progress, as in the
    * fleet's other collectors. A call holds its parse slot from its options
    * to its trailer, so without this a client that stalls mid-upload and set
    * no deadline would keep the slot for as long as its connection lived.
@@ -117,8 +117,8 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
   }
 
   /**
-   * @param idleTimeout longest wait for a request frame the server has asked
-   *     for before the call ends with DEADLINE_EXCEEDED; raised to one
+   * @param idleTimeout longest wait for the upload to make progress before
+   *     the call ends with DEADLINE_EXCEEDED; raised to one
    *     millisecond if smaller, because an idle stream is always bounded
    */
   public EmailParseServiceImpl(
@@ -374,9 +374,13 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
    * back.
    *
    * <p>Each frame the server asks for starts the idle clock; a client that
-   * sends nothing for the idle timeout is ended with DEADLINE_EXCEEDED and
-   * its slot freed. A call waiting for its slot is not timed, because nobody
-   * is reading it yet. The request callbacks and the timer share this
+   * makes no progress for the idle timeout is ended with DEADLINE_EXCEEDED
+   * and its slot freed. Progress is a frame that moves the upload forward:
+   * the options, a chunk with bytes in it, the chunk marked complete, the
+   * half-close. An empty chunk is taken in and the next frame asked for, but
+   * the clock keeps running, so a client cannot hold its slot by sending
+   * nothing in a steady trickle of frames. A call waiting for its slot is not
+   * timed, because nobody is reading it yet. The request callbacks and the timer share this
    * object's monitor, so a timer never ends a call in the middle of taking a
    * frame in.
    */
@@ -388,7 +392,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
     private final Buffer buffer = new Buffer();
     private final AtomicBoolean holdsSlot = new AtomicBoolean();
 
-    /** Counts frames taken in; a timer armed before the latest one is moot. */
+    /** Counts frames that made progress; a timer armed before the latest one is moot. */
     private long frameGeneration;
     private volatile ScheduledFuture<?> idleTimer;
 
@@ -442,7 +446,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
           () -> expire(generation), idleTimeout.toNanos(), TimeUnit.NANOSECONDS);
     }
 
-    /** A frame came in, so whatever timer was waiting for it is moot. */
+    /** The upload moved forward, so whatever timer was waiting for it is moot. */
     private synchronized void frameArrived() {
       frameGeneration++;
       ScheduledFuture<?> timer = idleTimer;
@@ -452,19 +456,21 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
       }
     }
 
-    /** The idle timer fired: if the frame it was waiting for never came, the call ends. */
+    /** The idle timer fired: if the upload has not moved since it was armed, the call ends. */
     private synchronized void expire(long generation) {
       if (generation != frameGeneration || aborted || cancelled || parseScheduled) {
         return;
       }
       metrics.messageRejected();
-      abort(Status.DEADLINE_EXCEEDED.withDescription("no request frame arrived for "
+      abort(Status.DEADLINE_EXCEEDED.withDescription("the upload made no progress for "
           + idleTimeout.toMillis() + " ms; a stalled upload may not hold a parse slot"));
     }
 
     @Override
     public synchronized void onNext(ParseEmailRequest request) {
-      frameArrived();
+      if (isProgress(request)) {
+        frameArrived();
+      }
       if (aborted || cancelled) {
         return;
       }
@@ -562,10 +568,27 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
       }
     }
 
-    /** Asks the transport for the next message once this one is taken in. */
-    private void requestNext() {
+    /**
+     * Whether a request moves the upload forward. Only an empty chunk that
+     * does not end the upload fails to: it carries nothing, so it must not
+     * reset the idle clock.
+     */
+    private static boolean isProgress(ParseEmailRequest request) {
+      return !request.hasChunk()
+          || !request.getChunk().getData().isEmpty()
+          || request.getChunk().getComplete();
+    }
+
+    /**
+     * Asks the transport for the next message once this one is taken in.
+     * The idle clock restarts only when this one made progress; otherwise
+     * the timer already running keeps counting from the last progress.
+     */
+    private void requestNext(boolean progress) {
       if (call != null && !aborted && !cancelled) {
-        armIdleTimer();
+        if (progress) {
+          armIdleTimer();
+        }
         call.request(1);
       }
     }
@@ -604,7 +627,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
         sawComplete = true;
       }
       sniff();
-      requestNext();
+      requestNext(!data.isEmpty() || complete);
     }
 
     /**

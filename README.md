@@ -84,7 +84,7 @@ advertisement the demo shell reads to build its tab bar.
 | `INVALID_ARGUMENT` | no bytes, no `complete` chunk, a chunk before options, repeated options, headers that never ended, a corrupt or truncated container, structure nested too deeply for a parsing library to follow |
 | `UNIMPLEMENTED` | bytes are not email (including an OLE2 file that is not MAPI) |
 | `RESOURCE_EXHAUSTED` | over the effective byte cap, or a parse that ran out of memory |
-| `DEADLINE_EXCEEDED` | the client sent no frame for the idle timeout while the server waited for one |
+| `DEADLINE_EXCEEDED` | the upload made no progress for the idle timeout while the server waited for it (empty chunks do not count) |
 | `INTERNAL` | unexpected parser fault |
 
 Every call ends with a status: an `Error` thrown mid-parse (a
@@ -189,7 +189,7 @@ place (their bytes are handed over so the coordinator can re-parse them).
 | `GRPC_EMAIL_MAX_DOCUMENT_MIB` | `64` | Per-message byte cap (`RESOURCE_EXHAUSTED` above it) |
 | `GRPC_EMAIL_MAX_ATTACHMENT_MIB` | `32` | Per-attachment payload cap for `include_attachment_bytes`; larger attachments are still described, just without their bytes |
 | `GRPC_EMAIL_MAX_CONCURRENT_PARSES` | `max(2, CPU cores)` | Calls admitted at once, upload and parse together; further calls wait, unread |
-| `GRPC_EMAIL_IDLE_TIMEOUT_SECONDS` | `30` | Longest wait for a request frame the server has asked for; past it the call ends with `DEADLINE_EXCEEDED` and frees its parse slot. A call waiting for a slot is not timed: nobody is reading it yet |
+| `GRPC_EMAIL_IDLE_TIMEOUT_SECONDS` | `30` | Longest wait for the upload to make progress (options, a chunk with bytes, the complete chunk); an empty chunk does not reset it. Past it the call ends with `DEADLINE_EXCEEDED` and frees its parse slot. A call waiting for a slot is not timed: nobody is reading it yet |
 | `GRPC_EMAIL_METRICS_INTERVAL_SECONDS` | `60` | Metrics line interval, `0` disables |
 
 Metrics are a stdout line on the interval:
@@ -251,13 +251,14 @@ RPC and nothing else.
 A client that cancels, or whose deadline passes, stops its parse at the next
 part and gives the slot back at once; nothing more is written to it. A
 client that simply stops sending mid-upload, deadline or not, is ended with
-`DEADLINE_EXCEEDED` once the idle timeout passes with no frame
+`DEADLINE_EXCEEDED` once the idle timeout passes with no progress
 (`GRPC_EMAIL_IDLE_TIMEOUT_SECONDS`, 30 s, as in the fleet's other
-collectors), and its slot comes back.
+collectors), and its slot comes back. Empty chunks are not progress, so a
+client cannot keep its slot by trickling them.
 
 ## Tests
 
-`./gradlew test` runs 159 tests with no network and no committed binaries.
+`./gradlew test` runs 160 tests with no network and no committed binaries.
 Fixtures are authored in memory: Jakarta Mail writes the `.eml`, and
 `MsgFixtures` builds `.msg` bytes from the MS-OXMSG layout up (compound-file
 streams, property chunks, recipient and attachment storages, an uncompressed
