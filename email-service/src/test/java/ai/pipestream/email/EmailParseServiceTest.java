@@ -452,6 +452,90 @@ class EmailParseServiceTest {
         .anyMatch(warning -> warning.contains("charset"));
   }
 
+  // --- damaged transfer encodings: one bad part never fails the message ----
+
+  @Test
+  @DisplayName("a base64 body that lost its padding keeps its text and says so")
+  void truncatedBase64BodyKeepsItsText() throws Exception {
+    Result result = parseWhole(EmlFixtures.truncatedBase64Body(), "eml-cut-base64");
+    assertThat(result.bodies()).hasSize(1);
+    assertThat(result.bodies().get(0).getText())
+        .as("the final short group still determines its two bytes")
+        .isEqualTo("hello world");
+    assertThat(result.bodies().get(0).getCharset()).isEqualTo("utf-8");
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
+    assertThat(result.status().getWarningsList())
+        .as("the warning blames the transfer encoding, not the charset")
+        .anyMatch(warning -> warning.contains("damaged base64"))
+        .noneMatch(warning -> warning.contains("charset"));
+  }
+
+  @Test
+  @DisplayName("an unknown Content-Transfer-Encoding keeps the bytes undecoded")
+  void unknownTransferEncodingKeepsTheBytes() throws Exception {
+    Result result = parseWhole(EmlFixtures.unknownTransferEncoding(), "eml-weird-cte");
+    assertThat(result.bodies()).hasSize(1);
+    assertThat(result.bodies().get(0).getText()).isEqualTo("the text is still plain\r\n");
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
+    assertThat(result.status().getWarningsList())
+        .anyMatch(warning -> warning.contains("unknown Content-Transfer-Encoding 'x-weird'"));
+  }
+
+  @Test
+  @DisplayName("a truncated base64 attachment keeps every byte that decoded")
+  void truncatedBase64AttachmentKeepsItsDecodedBytes() throws Exception {
+    byte[] message = EmlFixtures.truncatedBase64Attachment();
+    Result result = parse(message, ParseEmailOptions.newBuilder()
+        .setDocumentId("eml-cut-attachment").setIncludeAttachmentBytes(true).build(),
+        message.length);
+    assertThat(result.error()).as("one damaged attachment must not fail the message").isNull();
+    assertThat(result.bodies()).hasSize(1);
+    assertThat(result.bodies().get(0).getText().strip()).isEqualTo(EmlFixtures.PLAIN_BODY_ASCII);
+
+    // 30 base64 characters: seven whole groups (21 bytes) and a two-character
+    // group that still determines one more byte.
+    int recoverable = 22;
+    byte[] expected = java.util.Arrays.copyOf(EmlFixtures.TRUNCATED_PAYLOAD, recoverable);
+    assertThat(result.attachments()).hasSize(1);
+    Attachment attachment = result.attachments().get(0);
+    assertThat(attachment.getFilename()).isEqualTo("order.pdf");
+    assertThat(attachment.getSizeBytes())
+        .as("the size used to read 0, every decodable byte dropped")
+        .isEqualTo(recoverable);
+    assertThat(attachment.getData().toByteArray()).isEqualTo(expected);
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
+    assertThat(result.status().getWarningsList())
+        .anyMatch(warning -> warning.contains("damaged base64")
+            && warning.contains("kept the " + recoverable + " bytes"));
+  }
+
+  @Test
+  @DisplayName("an unquoted filename with spaces survives the strict parameter grammar")
+  void unquotedFilenameSurvives() throws Exception {
+    Result result = parseWhole(EmlFixtures.unquotedFilename(), "eml-unquoted");
+    assertThat(result.attachments()).hasSize(1);
+    assertThat(result.attachments().get(0).getFilename()).isEqualTo("my report.pdf");
+    assertThat(result.status().getWarningsList())
+        .as("the name was recovered, so nothing claims it was missing")
+        .noneMatch(warning -> warning.contains("no filename"));
+  }
+
+  @Test
+  @DisplayName("a multipart that never writes its boundary keeps its text as the body")
+  void multipartWithoutPartsKeepsItsText() throws Exception {
+    Result result = parseWhole(EmlFixtures.multipartWithoutParts(), "eml-no-parts");
+    assertThat(result.bodies()).hasSize(1);
+    BodyPart body = result.bodies().get(0);
+    assertThat(body.getMediaType()).isEqualTo(BodyMediaType.BODY_MEDIA_TYPE_PLAIN);
+    assertThat(body.getText()).isEqualTo(EmlFixtures.PLAIN_BODY_ASCII);
+    assertThat(body.getContentTypeRaw())
+        .as("the declared type stays honest about what the part claimed to be")
+        .isEqualTo("multipart/mixed");
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
+    assertThat(result.status().getWarningsList())
+        .anyMatch(warning -> warning.contains("carries no parts"));
+  }
+
   @Test
   void unnamedAttachmentWarnsButStillStreams() throws Exception {
     Result result = parseWhole(EmlFixtures.unnamedAttachment(), "eml-unnamed");

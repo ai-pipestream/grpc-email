@@ -102,6 +102,103 @@ final class EmlFixtures {
         + "the bytes are still readable\r\n").getBytes(StandardCharsets.US_ASCII);
   }
 
+  /** Header block shared by the hand-written damaged fixtures below. */
+  private static String handWrittenHeaders(String subject) {
+    return "From: " + FROM_EMAIL + "\r\n"
+        + "To: " + TO_EMAIL + "\r\n"
+        + "Subject: " + subject + "\r\n"
+        + "Message-ID: <" + MESSAGE_ID + ">\r\n"
+        + "MIME-Version: 1.0\r\n";
+  }
+
+  /**
+   * A text/plain body whose base64 lost its final padding character, the
+   * shape a size-capped archiver leaves behind: "hello world" with its last
+   * group three characters long. Written by hand because Jakarta Mail only
+   * writes well-formed base64.
+   */
+  static byte[] truncatedBase64Body() {
+    return (handWrittenHeaders("cut base64")
+        + "Content-Type: text/plain; charset=utf-8\r\n"
+        + "Content-Transfer-Encoding: base64\r\n"
+        + "\r\n"
+        + "aGVsbG8gd29ybGQ\r\n").getBytes(StandardCharsets.US_ASCII);
+  }
+
+  /** A body declaring a transfer encoding no decoder knows. */
+  static byte[] unknownTransferEncoding() {
+    return (handWrittenHeaders("weird encoding")
+        + "Content-Type: text/plain; charset=us-ascii\r\n"
+        + "Content-Transfer-Encoding: x-weird\r\n"
+        + "\r\n"
+        + "the text is still plain\r\n").getBytes(StandardCharsets.US_ASCII);
+  }
+
+  /** The payload {@link #truncatedBase64Attachment} encodes, before the cut. */
+  static final byte[] TRUNCATED_PAYLOAD =
+      "%PDF-1.4 the start of a longer document".getBytes(StandardCharsets.US_ASCII);
+
+  /** How many base64 characters of the payload survive the cut. */
+  static final int TRUNCATED_BASE64_CHARS = 30;
+
+  /**
+   * A body and a base64 attachment cut off mid-group, as a message truncated
+   * by a broken relay arrives: no closing boundary, and an attachment whose
+   * last group of base64 is two characters short.
+   */
+  static byte[] truncatedBase64Attachment() {
+    String encoded = java.util.Base64.getEncoder().encodeToString(TRUNCATED_PAYLOAD)
+        .substring(0, TRUNCATED_BASE64_CHARS);
+    return (handWrittenHeaders("cut attachment")
+        + "Content-Type: multipart/mixed; boundary=\"cut\"\r\n"
+        + "\r\n"
+        + "--cut\r\n"
+        + "Content-Type: text/plain; charset=us-ascii\r\n"
+        + "\r\n"
+        + PLAIN_BODY_ASCII + "\r\n"
+        + "--cut\r\n"
+        + "Content-Type: application/pdf; name=\"order.pdf\"\r\n"
+        + "Content-Disposition: attachment; filename=\"order.pdf\"\r\n"
+        + "Content-Transfer-Encoding: base64\r\n"
+        + "\r\n"
+        + encoded + "\r\n").getBytes(StandardCharsets.US_ASCII);
+  }
+
+  /** An ASCII body for the hand-written fixtures. */
+  static final String PLAIN_BODY_ASCII = "The hearing begins at 09:00.";
+
+  /**
+   * An attachment whose filename has spaces and no quotes, which the strict
+   * MIME parameter grammar rejects outright.
+   */
+  static byte[] unquotedFilename() {
+    return (handWrittenHeaders("unquoted filename")
+        + "Content-Type: multipart/mixed; boundary=\"b1\"\r\n"
+        + "\r\n"
+        + "--b1\r\n"
+        + "Content-Type: text/plain; charset=us-ascii\r\n"
+        + "\r\n"
+        + PLAIN_BODY_ASCII + "\r\n"
+        + "--b1\r\n"
+        + "Content-Type: application/pdf; name=my report.pdf\r\n"
+        + "Content-Disposition: attachment; filename=my report.pdf\r\n"
+        + "\r\n"
+        + "%PDF-1.4\r\n"
+        + "--b1--\r\n").getBytes(StandardCharsets.US_ASCII);
+  }
+
+  /**
+   * A message that claims to be multipart but never writes its boundary, so
+   * its whole text is preamble: Jakarta Mail's strict parser calls this a
+   * missing start boundary and fails the message.
+   */
+  static byte[] multipartWithoutParts() {
+    return (handWrittenHeaders("no parts")
+        + "Content-Type: multipart/mixed; boundary=\"never-written\"\r\n"
+        + "\r\n"
+        + PLAIN_BODY_ASCII + "\r\n").getBytes(StandardCharsets.US_ASCII);
+  }
+
   /** An attachment part with no filename, which must warn rather than fail. */
   static byte[] unnamedAttachment() throws Exception {
     MimeMessage message = envelope();

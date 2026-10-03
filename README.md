@@ -133,10 +133,17 @@ an invented page number.
 
 ## Formats
 
-- **`.eml`**: Jakarta Mail over a `ByteArrayInputStream`, with the lenient
-  MIME properties real mailboxes need. Encoded-word headers and filenames are
-  decoded; a part whose declared charset does not exist is read as ISO-8859-1
-  with a warning rather than failing.
+- **`.eml`**: Jakarta Mail over the in-memory bytes, with the leniency real
+  mailboxes need applied per part rather than through Jakarta Mail's
+  JVM-wide System properties (which it reads instead of the `Session`). One
+  damaged part never fails the message: a base64 or uuencoded part cut short
+  keeps every byte that decoded, a part with an unknown
+  `Content-Transfer-Encoding` keeps its bytes undecoded, and a part whose
+  declared charset does not exist is read as ISO-8859-1, each with a
+  `STATE_PARTIAL` warning naming what was repaired. Encoded words decode even
+  when a mailer glued them to the surrounding text, an unquoted filename with
+  spaces survives the strict parameter grammar, and a multipart that carries
+  no parts keeps its text as a plain body.
 - **`.msg`**: POI `MAPIMessage`. Recipients are role-tagged from
   `PidTagRecipientType` (1 to / 2 cc / 3 bcc). Bodies come from `PidTagBody`
   and `PidTagHtml`; HTML wins over RTF, and an RTF-only message gets

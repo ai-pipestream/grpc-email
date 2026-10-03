@@ -285,6 +285,36 @@ class HeaderProjectionUnitTest {
   }
 
   @Test
+  @DisplayName("an encoded word glued to the text around it still decodes")
+  void anEncodedWordInsideAWordDecodes() {
+    assertThat(HeaderProjection.decoded("foo=?UTF-8?Q?bar?=baz"))
+        .as("strict decoding handed back the raw RFC 2047 syntax here")
+        .isEqualTo("foobarbaz");
+    assertThat(HeaderProjection.decoded("Re:=?UTF-8?Q?_caf=C3=A9?="))
+        .isEqualTo("Re: café");
+    assertThat(HeaderProjection.decoded("=?UTF-8?Q?a?==?UTF-8?Q?b?="))
+        .as("two words with nothing between them both decode")
+        .isEqualTo("ab");
+  }
+
+  @Test
+  @DisplayName("whitespace between two encoded words is not content")
+  void whitespaceBetweenEncodedWordsIsDropped() {
+    assertThat(HeaderProjection.decoded("=?UTF-8?Q?Hola?= =?UTF-8?Q?_se=C3=B1or?="))
+        .isEqualTo("Hola señor");
+    assertThat(HeaderProjection.decoded("plain =?UTF-8?Q?word?= tail"))
+        .as("whitespace next to plain text is content and stays")
+        .isEqualTo("plain word tail");
+  }
+
+  @Test
+  @DisplayName("a word in an unknown charset stays literal and the rest still decodes")
+  void anUnknownCharsetDoesNotTakeTheHeaderDown() {
+    assertThat(HeaderProjection.decoded("=?x-no-such-charset?Q?a?= =?UTF-8?Q?caf=C3=A9?="))
+        .isEqualTo("=?x-no-such-charset?Q?a?= café");
+  }
+
+  @Test
   void unreadableHeaderBlockIsInvalidEmail() {
     assertThatExceptionOfType(InvalidEmailException.class)
         .isThrownBy(() -> HeaderProjection.read(null, 0));

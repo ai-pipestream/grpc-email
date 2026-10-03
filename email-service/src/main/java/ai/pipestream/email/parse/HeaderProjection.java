@@ -11,12 +11,14 @@ import jakarta.mail.internet.InternetHeaders;
 import jakarta.mail.internet.MailDateFormat;
 import jakarta.mail.internet.MimeUtility;
 import java.io.ByteArrayInputStream;
+import java.io.UnsupportedEncodingException;
 import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.Enumeration;
 import java.util.List;
 import java.util.Locale;
+import java.util.StringTokenizer;
 
 /**
  * Turns an RFC 822 header block into the typed EmailInfo event. Everything
@@ -160,16 +162,88 @@ public final class HeaderProjection {
     return trimmed;
   }
 
-  /** MIME-word decodes a header value, falling back to the raw text. */
+  /**
+   * MIME-word decodes a header value; anything that will not decode stays as
+   * written.
+   *
+   * <p>This is Jakarta Mail's lenient decoding ({@code
+   * mail.mime.decodetext.strict=false}) done here, per call, because Jakarta
+   * Mail reads that switch from a System property once, when MimeUtility
+   * first loads, and setting it on a Session does nothing. Strict decoding
+   * only recognizes an encoded word that stands alone between spaces, so a
+   * mailer that glues one to the text around it ({@code
+   * foo=?UTF-8?Q?bar?=baz}) got the raw RFC 2047 syntax back. Here every
+   * encoded word decodes wherever it sits; whitespace between two adjacent
+   * encoded words is dropped, as RFC 2047 section 6.2 requires; and a word
+   * in a charset this JVM does not know stays literal without taking the
+   * rest of the header down with it.
+   */
   public static String decoded(String value) {
     if (value == null || value.isEmpty()) {
       return "";
     }
-    try {
-      return MimeUtility.decodeText(MimeUtility.unfold(value));
-    } catch (Exception undecodable) {
-      return MimeUtility.unfold(value);
+    String unfolded = MimeUtility.unfold(value);
+    if (!unfolded.contains("=?")) {
+      return unfolded;
     }
+    StringBuilder text = new StringBuilder(unfolded.length());
+    StringBuilder space = new StringBuilder();
+    boolean previousEncoded = false;
+    StringTokenizer tokens = new StringTokenizer(unfolded, " \t\r\n", true);
+    while (tokens.hasMoreTokens()) {
+      String token = tokens.nextToken();
+      char first = token.charAt(0);
+      if (first == ' ' || first == '\t' || first == '\r' || first == '\n') {
+        space.append(first);
+        continue;
+      }
+      StringBuilder word = new StringBuilder(token.length());
+      if (decodeWords(token, word)) {
+        if (!(previousEncoded && token.startsWith("=?"))) {
+          text.append(space);
+        }
+        previousEncoded = token.endsWith("?=");
+      } else {
+        text.append(space);
+        previousEncoded = false;
+      }
+      text.append(word);
+      space.setLength(0);
+    }
+    return text.append(space).toString();
+  }
+
+  /**
+   * Decodes every {@code =?charset?encoding?text?=} inside one
+   * whitespace-free token, keeping the text around them and any word that
+   * will not decode as written.
+   *
+   * @return true when at least one encoded word decoded
+   */
+  private static boolean decodeWords(String token, StringBuilder out) {
+    boolean decodedAny = false;
+    int cursor = 0;
+    while (true) {
+      int start = token.indexOf("=?", cursor);
+      int charsetEnd = start < 0 ? -1 : token.indexOf('?', start + 2);
+      int encodingEnd = charsetEnd < 0 ? -1 : token.indexOf('?', charsetEnd + 1);
+      int end = encodingEnd < 0 ? -1 : token.indexOf("?=", encodingEnd + 1);
+      if (end < 0) {
+        break;
+      }
+      out.append(token, cursor, start);
+      String encoded = token.substring(start, end + 2);
+      try {
+        out.append(MimeUtility.decodeWord(encoded));
+        decodedAny = true;
+      } catch (jakarta.mail.internet.ParseException | UnsupportedEncodingException
+          | RuntimeException undecodable) {
+        out.append(encoded);
+      }
+      cursor = end + 2;
+    }
+    out.append(token, cursor, token.length());
+    return decodedAny;
   }
 
   private static void addAddresses(
