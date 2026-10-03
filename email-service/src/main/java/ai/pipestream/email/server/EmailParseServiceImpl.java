@@ -82,6 +82,16 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
   public static final Duration DEFAULT_IDLE_TIMEOUT = Duration.ofSeconds(30);
 
   /**
+   * Longest a call's whole upload may take once it holds a parse slot, as in
+   * the fleet's other collectors. The idle timeout alone stops a stalled
+   * upload but not a slow one: a client sending one byte just inside every
+   * idle timeout would keep its slot indefinitely, and enough of them would
+   * hold every slot. Five minutes moves a full 64 MiB message at well under
+   * 1 MiB/s.
+   */
+  public static final Duration DEFAULT_UPLOAD_TIMEOUT = Duration.ofSeconds(300);
+
+  /**
    * Warnings one trailer carries. Past this many the rest are counted and
    * reported in one closing line: a hostile message can raise a warning for
    * every few bytes it holds, and a trailer of millions of them would outgrow
@@ -94,7 +104,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
   private static final String MAIL_VERSION = readMailVersion();
 
   /**
-   * Arms every call's idle timer. Its only work is ending a stalled call,
+   * Arms every call's idle and upload timers. Their only work is ending a stalled call,
    * which takes microseconds, so one daemon thread serves the process.
    */
   private static final ScheduledThreadPoolExecutor IDLE_TIMERS = idleTimers();
@@ -105,6 +115,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
   private final Semaphore parseSlots;
   private final ExecutorService executor;
   private final Duration idleTimeout;
+  private final Duration uploadTimeout;
   private final ParseMetrics metrics = new ParseMetrics();
 
   public EmailParseServiceImpl(
@@ -127,6 +138,26 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
       int maxConcurrentParses,
       ExecutorService executor,
       Duration idleTimeout) {
+    this(maxDocumentBytes, maxAttachmentBytes, maxConcurrentParses, executor, idleTimeout,
+        DEFAULT_UPLOAD_TIMEOUT);
+  }
+
+  /**
+   * @param idleTimeout longest wait for the upload to make progress before
+   *     the call ends with DEADLINE_EXCEEDED; raised to one
+   *     millisecond if smaller, because an idle stream is always bounded
+   * @param uploadTimeout longest the whole upload may take, counted from the
+   *     moment the call holds its parse slot, before the call ends with
+   *     DEADLINE_EXCEEDED however steadily it was sending; raised to one
+   *     millisecond if smaller
+   */
+  public EmailParseServiceImpl(
+      long maxDocumentBytes,
+      long maxAttachmentBytes,
+      int maxConcurrentParses,
+      ExecutorService executor,
+      Duration idleTimeout,
+      Duration uploadTimeout) {
     this.maxDocumentBytes = maxDocumentBytes;
     this.maxAttachmentBytes = maxAttachmentBytes;
     this.maxConcurrentParses = maxConcurrentParses;
@@ -135,6 +166,9 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
     this.idleTimeout = idleTimeout.compareTo(Duration.ofMillis(1)) < 0
         ? Duration.ofMillis(1)
         : idleTimeout;
+    this.uploadTimeout = uploadTimeout.compareTo(Duration.ofMillis(1)) < 0
+        ? Duration.ofMillis(1)
+        : uploadTimeout;
   }
 
   private static ScheduledThreadPoolExecutor idleTimers() {
@@ -380,9 +414,14 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
    * half-close. An empty chunk is taken in and the next frame asked for, but
    * the clock keeps running, so a client cannot hold its slot by sending
    * nothing in a steady trickle of frames. A call waiting for its slot is not
-   * timed, because nobody is reading it yet. The request callbacks and the timer share this
-   * object's monitor, so a timer never ends a call in the middle of taking a
-   * frame in.
+   * timed, because nobody is reading it yet.
+   *
+   * <p>Once admitted, the whole upload also runs against the upload
+   * timeout, progress or not: a call that is still uploading when it passes
+   * is ended with DEADLINE_EXCEEDED and its slot freed, so a client that
+   * trickles a byte at a time cannot hold a slot for longer than that. The
+   * request callbacks and the timers share this object's monitor, so a timer
+   * never ends a call in the middle of taking a frame in.
    */
   private final class Upload implements StreamObserver<ParseEmailRequest> {
 
@@ -395,6 +434,8 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
     /** Counts frames that made progress; a timer armed before the latest one is moot. */
     private long frameGeneration;
     private volatile ScheduledFuture<?> idleTimer;
+    /** Ends an upload still open this long after admission; null until admitted. */
+    private volatile ScheduledFuture<?> uploadTimer;
 
     private ParseOptions options;
     private Sink sink;
@@ -454,6 +495,38 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
         timer.cancel(false);
         idleTimer = null;
       }
+    }
+
+    /**
+     * Starts the whole-upload clock once the call holds its slot. Only a
+     * transport is timed, as with the idle clock.
+     */
+    private synchronized void armUploadTimer() {
+      if (call == null || aborted || cancelled) {
+        return;
+      }
+      uploadTimer = IDLE_TIMERS.schedule(
+          this::uploadExpired, uploadTimeout.toNanos(), TimeUnit.NANOSECONDS);
+    }
+
+    /** The upload is over, one way or another, so its clock is moot. */
+    private void stopUploadTimer() {
+      ScheduledFuture<?> timer = uploadTimer;
+      if (timer != null) {
+        timer.cancel(false);
+        uploadTimer = null;
+      }
+    }
+
+    /** The upload timer fired: a call still uploading ends, however steadily it was sending. */
+    private synchronized void uploadExpired() {
+      if (aborted || cancelled || parseScheduled) {
+        return;
+      }
+      metrics.messageRejected();
+      abort(Status.DEADLINE_EXCEEDED.withDescription("the upload did not finish within "
+          + uploadTimeout.toMillis() + " ms of admission; a slow upload may not hold a parse"
+          + " slot indefinitely"));
     }
 
     /** The idle timer fired: if the upload has not moved since it was armed, the call ends. */
@@ -541,6 +614,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
             releaseSlot();
             return;
           }
+          armUploadTimer();
           armIdleTimer();
           call.request(1);
         });
@@ -563,6 +637,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
      */
     private void cancel() {
       cancelled = true;
+      stopUploadTimer();
       if (!parseScheduled) {
         releaseSlot();
       }
@@ -697,6 +772,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
       byte[] bytes = buffer.take();
       metrics.bytesReceived(bytes.length);
       parseScheduled = true;
+      stopUploadTimer();
       try {
         executor.execute(() -> run(bytes));
       } catch (RejectedExecutionException shuttingDown) {
@@ -804,6 +880,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
         if (timer != null) {
           timer.cancel(false);
         }
+        stopUploadTimer();
       }
     }
   }

@@ -122,7 +122,13 @@ class ServiceRobustnessTest {
   }
 
   private static EmailParseServiceImpl singleSlotService(Duration idleTimeout) {
-    return new EmailParseServiceImpl(MESSAGE_CAP, ATTACHMENT_CAP, 1, executor, idleTimeout);
+    return singleSlotService(idleTimeout, EmailParseServiceImpl.DEFAULT_UPLOAD_TIMEOUT);
+  }
+
+  private static EmailParseServiceImpl singleSlotService(
+      Duration idleTimeout, Duration uploadTimeout) {
+    return new EmailParseServiceImpl(
+        MESSAGE_CAP, ATTACHMENT_CAP, 1, executor, idleTimeout, uploadTimeout);
   }
 
   // --- over the in-process transport: admission and cancellation ----------
@@ -137,7 +143,12 @@ class ServiceRobustnessTest {
   }
 
   private void startOneSlotServer(Duration idleTimeout) throws Exception {
-    service = singleSlotService(idleTimeout);
+    startOneSlotServer(idleTimeout, EmailParseServiceImpl.DEFAULT_UPLOAD_TIMEOUT);
+  }
+
+  private void startOneSlotServer(Duration idleTimeout, Duration uploadTimeout)
+      throws Exception {
+    service = singleSlotService(idleTimeout, uploadTimeout);
     String name = InProcessServerBuilder.generateName();
     server = InProcessServerBuilder.forName(name).directExecutor()
         .addService(service)
@@ -378,6 +389,35 @@ class ServiceRobustnessTest {
 
     Call next = Call.start(stub()).finishUpload(message, 0).await();
     assertThat(next.completed).as("the stalled call gave its slot back").isTrue();
+  }
+
+  @Test
+  @DisplayName("a steady one-byte trickle still ends at the upload timeout and frees its slot")
+  void aSlowUploadEndsAtTheUploadTimeout() throws Exception {
+    startOneSlotServer(SHORT_IDLE, Duration.ofMillis(1500));
+    byte[] message = EmlFixtures.multipartWithAttachments();
+    int headerEnd = EmlFixtures.headerBlockEnd(message);
+
+    // One byte every 100 ms: progress each time, so the idle clock never
+    // runs out, and without a whole-upload bound this held the only slot
+    // for as long as the message had bytes left.
+    Call slow = Call.start(stub()).chunk(message, 0, headerEnd, false);
+    int offset = headerEnd;
+    for (int step = 0; step < 60 && slow.done.getCount() > 0; step++) {
+      Thread.sleep(100);
+      slow.chunk(message, offset, offset + 1, false);
+      offset++;
+    }
+    assertThat(slow.done.getCount())
+        .as("the call ended while bytes were still coming, four upload timeouts in")
+        .isZero();
+    assertThat(slow.code()).isEqualTo(Status.Code.DEADLINE_EXCEEDED);
+    assertThat(Status.fromThrowable(slow.failure.get()).getDescription())
+        .contains("the upload did not finish within 1500 ms of admission");
+
+    Call next = Call.start(stub()).finishUpload(message, 0).await();
+    assertThat(next.completed).as("the slow call gave its slot back").isTrue();
+    assertThat(service.metrics().render()).contains("rejected=1,");
   }
 
   @Test

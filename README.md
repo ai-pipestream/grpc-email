@@ -190,6 +190,7 @@ place (their bytes are handed over so the coordinator can re-parse them).
 | `GRPC_EMAIL_MAX_ATTACHMENT_MIB` | `32` | Per-attachment payload cap for `include_attachment_bytes`; larger attachments are still described, just without their bytes |
 | `GRPC_EMAIL_MAX_CONCURRENT_PARSES` | `max(2, CPU cores)` | Calls admitted at once, upload and parse together; further calls wait, unread |
 | `GRPC_EMAIL_IDLE_TIMEOUT_SECONDS` | `30` | Longest wait for the upload to make progress (options, a chunk with bytes, the complete chunk); an empty chunk does not reset it. Past it the call ends with `DEADLINE_EXCEEDED` and frees its parse slot. A call waiting for a slot is not timed: nobody is reading it yet |
+| `GRPC_EMAIL_UPLOAD_TIMEOUT_SECONDS` | `300` | Longest a call's whole upload may take, counted from the moment it holds its parse slot; past it the call ends with `DEADLINE_EXCEEDED` and frees its slot, however steadily it was sending |
 | `GRPC_EMAIL_METRICS_INTERVAL_SECONDS` | `60` | Metrics line interval, `0` disables |
 
 Metrics are a stdout line on the interval:
@@ -254,11 +255,14 @@ client that simply stops sending mid-upload, deadline or not, is ended with
 `DEADLINE_EXCEEDED` once the idle timeout passes with no progress
 (`GRPC_EMAIL_IDLE_TIMEOUT_SECONDS`, 30 s, as in the fleet's other
 collectors), and its slot comes back. Empty chunks are not progress, so a
-client cannot keep its slot by trickling them.
+client cannot keep its slot by trickling them. Nor can it by trickling
+bytes: once admitted, the whole upload must finish within the upload timeout
+(`GRPC_EMAIL_UPLOAD_TIMEOUT_SECONDS`, 300 s), or the call ends with
+`DEADLINE_EXCEEDED` and its slot comes back.
 
 ## Tests
 
-`./gradlew test` runs 160 tests with no network and no committed binaries.
+`./gradlew test` runs 161 tests with no network and no committed binaries.
 Fixtures are authored in memory: Jakarta Mail writes the `.eml`, and
 `MsgFixtures` builds `.msg` bytes from the MS-OXMSG layout up (compound-file
 streams, property chunks, recipient and attachment storages, an uncompressed

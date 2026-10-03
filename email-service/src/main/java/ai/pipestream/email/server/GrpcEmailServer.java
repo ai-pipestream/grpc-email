@@ -37,10 +37,15 @@ public final class GrpcEmailServer {
     // No zero here: an idle stream with no bound is what the timeout prevents.
     final Duration idleTimeout = Duration.ofSeconds(intFromEnv("GRPC_EMAIL_IDLE_TIMEOUT_SECONDS",
         (int) EmailParseServiceImpl.DEFAULT_IDLE_TIMEOUT.toSeconds(), 1, 86400));
+    // No zero here either: an upload with no bound is what this one prevents.
+    final Duration uploadTimeout = Duration.ofSeconds(intFromEnv(
+        "GRPC_EMAIL_UPLOAD_TIMEOUT_SECONDS",
+        (int) EmailParseServiceImpl.DEFAULT_UPLOAD_TIMEOUT.toSeconds(), 1, 86400));
 
     ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     EmailParseServiceImpl service = new EmailParseServiceImpl(
-        maxDocumentBytes, maxAttachmentBytes, maxConcurrent, executor, idleTimeout);
+        maxDocumentBytes, maxAttachmentBytes, maxConcurrent, executor, idleTimeout,
+        uploadTimeout);
     HealthStatusManager health = new HealthStatusManager();
     Server server =
         Grpc.newServerBuilderForPort(port, InsecureServerCredentials.create())
@@ -58,7 +63,8 @@ public final class GrpcEmailServer {
         + " listening on 0.0.0.0:" + port + " (POI " + org.apache.poi.Version.getVersion()
         + ", max " + (maxDocumentBytes >> 20) + " MiB message / "
         + (maxAttachmentBytes >> 20) + " MiB attachment, " + maxConcurrent
-        + " concurrent parses, " + idleTimeout.toSeconds() + " s idle timeout)");
+        + " concurrent parses, " + idleTimeout.toSeconds() + " s idle / "
+        + uploadTimeout.toSeconds() + " s upload timeout)");
 
     if (metricsInterval > 0) {
       Thread.ofPlatform().name("grpc-email-metrics").daemon().start(() -> {
