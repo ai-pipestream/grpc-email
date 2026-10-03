@@ -3,17 +3,22 @@ package ai.pipestream.email.parse;
 import ai.pipestream.email.v1.Attachment;
 import ai.pipestream.email.v1.BodyMediaType;
 import ai.pipestream.email.v1.BodyPart;
-import com.google.protobuf.ByteString;
 import jakarta.mail.Message;
 import jakarta.mail.MessagingException;
-import jakarta.mail.Multipart;
 import jakarta.mail.Part;
 import jakarta.mail.Session;
 import jakarta.mail.internet.ContentType;
 import jakarta.mail.internet.MimeMessage;
-import java.io.ByteArrayInputStream;
+import jakarta.mail.internet.MimeMultipart;
+import jakarta.mail.internet.MimePart;
+import jakarta.mail.internet.MimePartDataSource;
+import jakarta.mail.internet.MimeUtility;
+import jakarta.mail.util.SharedByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.Properties;
 
@@ -30,25 +35,53 @@ import java.util.Properties;
 public final class EmlParser {
 
   /**
-   * Jakarta Mail defaults abort on the malformed mail that real mailboxes
-   * are full of. Every relaxation here turns a hard failure into a decoded
-   * part; none of them invent content.
+   * The Session-scoped leniency. Jakarta Mail defaults abort on the
+   * malformed mail real mailboxes are full of, but it reads almost every
+   * relaxation from System properties, several of them only once, when the
+   * class that uses them first loads; only {@code mail.mime.address.strict}
+   * is read from the Session. The rest are applied where this parser
+   * controls them, one part at a time, so nothing is global and a repair
+   * can be reported instead of silently made:
+   *
+   * <ul>
+   *   <li>{@code mail.mime.multipart.*}: {@link LenientMultipart}.
+   *   <li>{@code mail.mime.base64.ignoreerrors}, {@code
+   *       mail.mime.uudecode.ignoreerrors}, {@code
+   *       mail.mime.ignoreunknownencoding}: {@link TransferDecoding}, after
+   *       the strict decoder refuses a part.
+   *   <li>{@code mail.mime.decodetext.strict}: {@link HeaderProjection#decoded}.
+   *   <li>{@code mail.mime.parameters.strict}: {@link #lenientParameter}.
+   *   <li>{@code mail.mime.decodefilename}: {@link #filename} decodes.
+   * </ul>
+   *
+   * <p>Every relaxation turns a hard failure into a decoded part; none of
+   * them invent content.
    */
   private static final Properties LENIENT = lenientProperties();
+
+  /**
+   * How many multiparts deep the walk descends. Real mail nests a handful
+   * (mixed, related, alternative, perhaps a signed wrapper around them);
+   * thirty-two leaves room for any mailer's habits while bounding the
+   * recursion.
+   */
+  public static final int MAX_MULTIPART_DEPTH = 32;
+
+  /**
+   * How many times over the message's own size the walk will scan multipart
+   * content. Jakarta Mail rescans every byte of a multipart to find its
+   * boundaries, so each level of nesting costs another pass over everything
+   * below it: thirty-two full-size levels turned a 64 MiB message into a
+   * quarter of a minute of CPU. Real structures (a signed wrapper around
+   * mixed around related around alternative) stay well under this.
+   */
+  public static final int MAX_MULTIPART_SCAN_FACTOR = 8;
 
   private EmlParser() {}
 
   private static Properties lenientProperties() {
     Properties properties = new Properties();
     properties.setProperty("mail.mime.address.strict", "false");
-    properties.setProperty("mail.mime.decodetext.strict", "false");
-    properties.setProperty("mail.mime.decodefilename", "true");
-    properties.setProperty("mail.mime.multipart.allowempty", "true");
-    properties.setProperty("mail.mime.multipart.ignoremissingendboundary", "true");
-    properties.setProperty("mail.mime.base64.ignoreerrors", "true");
-    properties.setProperty("mail.mime.ignoreunknownencoding", "true");
-    properties.setProperty("mail.mime.uudecode.ignoreerrors", "true");
-    properties.setProperty("mail.mime.parameters.strict", "false");
     return properties;
   }
 
@@ -56,52 +89,181 @@ public final class EmlParser {
   public static void parse(byte[] bytes, ParseOptions options, ParseSink sink) {
     MimeMessage message;
     try {
+      // A shared stream: every part reads the upload's own bytes in place,
+      // where a plain stream made Jakarta Mail copy the whole body first.
       message = new MimeMessage(
-          Session.getInstance(LENIENT), new ByteArrayInputStream(bytes));
+          Session.getInstance(LENIENT), new SharedByteArrayInputStream(bytes));
     } catch (MessagingException unreadable) {
       throw new InvalidEmailException(
           "unreadable RFC 822 message: " + unreadable.getMessage(), unreadable);
     }
-    Counter attachments = new Counter();
-    walk(message, "1", options, sink, attachments);
+    walk(message, "1", 1, options, sink,
+        new WalkState((long) MAX_MULTIPART_SCAN_FACTOR * bytes.length));
   }
 
-  /** Mutable attachment index, threaded through the recursive walk. */
-  private static final class Counter {
-    private int value;
-  }
+  /**
+   * What the recursive walk carries: the attachment index, the scan budget,
+   * and whether a body has gone out yet (a TNEF container's body is used
+   * only when the message has none of its own).
+   */
+  private static final class WalkState {
+    private final long scanBudget;
+    private long scanned;
+    private int attachments;
+    private boolean bodyEmitted;
 
-  private static void walk(
-      Part part, String path, ParseOptions options, ParseSink sink, Counter attachments) {
-    if (isMultipart(part)) {
-      Multipart multipart;
-      try {
-        multipart = (Multipart) part.getContent();
-      } catch (IOException | MessagingException broken) {
-        throw new InvalidEmailException(
-            "truncated multipart at " + path + ": " + broken.getMessage(), broken);
+    private WalkState(long scanBudget) {
+      this.scanBudget = scanBudget;
+    }
+
+    /** Charges a multipart's bytes to the budget, or refuses when they do not fit. */
+    private boolean admitScan(long bytes) {
+      if (scanned + bytes > scanBudget) {
+        return false;
       }
+      scanned += bytes;
+      return true;
+    }
+  }
+
+  /**
+   * One step of the MIME walk; {@code depth} is how many parts deep this one
+   * sits, the root being 1. Only multipart nesting recurses: a nested
+   * message/rfc822 is handed over whole as an attachment and never walked.
+   */
+  private static void walk(
+      Part part, String path, int depth, ParseOptions options, ParseSink sink,
+      WalkState state) {
+    sink.checkpoint();
+    if (isMultipart(part)) {
+      // A megabyte of input nests thousands of multiparts deep, and every
+      // level rescans the bytes below it before the recursion ends in a
+      // StackOverflowError. Past either bound the subtree is kept, whole and
+      // unwalked, as the bytes of one attachment.
+      String refusal = depth > MAX_MULTIPART_DEPTH
+          ? "nests multiparts deeper than " + MAX_MULTIPART_DEPTH + " levels"
+          : !state.admitScan(size(part))
+              ? "would take the multipart scan past " + MAX_MULTIPART_SCAN_FACTOR
+                  + " times the message's size"
+              : null;
+      if (refusal != null) {
+        sink.warn("part " + path + " " + refusal
+            + "; its subtree was emitted as one opaque attachment rather than walked");
+        emitAttachment(part, path, HeaderProjection.baseType(header(part, "Content-Type", "")),
+            filename(part), disposition(part), options, sink, state);
+        return;
+      }
+      MimeMultipart multipart;
       int count;
       try {
+        multipart = new LenientMultipart(part);
         count = multipart.getCount();
       } catch (MessagingException broken) {
         throw new InvalidEmailException(
             "unreadable multipart at " + path + ": " + broken.getMessage(), broken);
       }
+      if (count == 0) {
+        emitPreamble(part, multipart, path, sink, state);
+        return;
+      }
       for (int index = 0; index < count; index++) {
         try {
-          walk(multipart.getBodyPart(index), path + "." + (index + 1), options, sink, attachments);
+          walk(multipart.getBodyPart(index), path + "." + (index + 1), depth + 1, options, sink,
+              state);
         } catch (MessagingException broken) {
           sink.warn("part " + path + "." + (index + 1) + " skipped: " + broken.getMessage());
         }
       }
       return;
     }
-    emitLeaf(part, path, options, sink, attachments);
+    emitLeaf(part, path, options, sink, state);
+  }
+
+  /** A part's content size in bytes, or 0 when Jakarta Mail cannot tell. */
+  private static long size(Part part) {
+    try {
+      return Math.max(0, part.getSize());
+    } catch (MessagingException unknown) {
+      return 0;
+    }
+  }
+
+  /**
+   * Parses multipart bodies with the leniency set per instance rather than
+   * read from the {@code mail.mime.multipart.*} System properties, which is
+   * where Jakarta Mail would otherwise look each time a multipart parses.
+   */
+  private static final class LenientMultipart extends MimeMultipart {
+
+    private LenientMultipart(Part part) throws MessagingException {
+      super(new MimePartDataSource(mimePart(part)));
+    }
+
+    private static MimePart mimePart(Part part) throws MessagingException {
+      if (part instanceof MimePart mime) {
+        return mime;
+      }
+      throw new MessagingException("not a MIME part: " + part.getClass().getName());
+    }
+
+    @Override
+    protected void initializeProperties() {
+      // A message cut off mid-part keeps every part before the cut.
+      ignoreMissingEndBoundary = true;
+      // A multipart that forgot its boundary parameter is read by the
+      // first boundary-shaped line, as Jakarta Mail does by default.
+      ignoreMissingBoundaryParameter = true;
+      ignoreExistingBoundaryParameter = false;
+      // No parts is an empty container, not a broken message.
+      allowEmpty = true;
+    }
+  }
+
+  /**
+   * A multipart with no parts: a container emptied on the way (an
+   * attachment-stripping gateway), or a message that only claims to be
+   * multipart and whose whole text sits before a boundary that never comes.
+   * Either way the text ahead of the first boundary is all the content
+   * there is, so it is kept as a plain body rather than dropped.
+   */
+  private static void emitPreamble(
+      Part part, MimeMultipart multipart, String path, ParseSink sink, WalkState state) {
+    String preamble;
+    try {
+      preamble = multipart.getPreamble();
+    } catch (MessagingException unreadable) {
+      preamble = null;
+    }
+    if (preamble == null || preamble.isBlank()) {
+      sink.warn("multipart at part " + path + " carries no parts");
+      return;
+    }
+    sink.warn("multipart at part " + path
+        + " carries no parts; the text before its first boundary was read as a plain body");
+    Decoded decoded = utf8OrLatin1(preamble.getBytes(StandardCharsets.ISO_8859_1));
+    sink.bodyPart(
+        BodyPart.newBuilder()
+            .setPartId(path)
+            .setMediaType(BodyMediaType.BODY_MEDIA_TYPE_PLAIN)
+            .setContentTypeRaw(HeaderProjection.baseType(header(part, "Content-Type", "")))
+            .setText(decoded.text().strip())
+            .setCharset(decoded.charset())
+            .build());
+    state.bodyEmitted = true;
+  }
+
+  /** Bytes with no declared charset: UTF-8 when they are valid UTF-8, else ISO-8859-1. */
+  private static Decoded utf8OrLatin1(byte[] bytes) {
+    try {
+      return new Decoded(
+          StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString(), "utf-8");
+    } catch (CharacterCodingException notUtf8) {
+      return new Decoded(new String(bytes, StandardCharsets.ISO_8859_1), "iso-8859-1");
+    }
   }
 
   private static void emitLeaf(
-      Part part, String path, ParseOptions options, ParseSink sink, Counter attachments) {
+      Part part, String path, ParseOptions options, ParseSink sink, WalkState state) {
     String contentType = header(part, "Content-Type", "text/plain");
     String baseType = HeaderProjection.baseType(contentType);
     String disposition = disposition(part);
@@ -111,13 +273,14 @@ public final class EmlParser {
 
     if (textual && !forcedAttachment && filename.isEmpty()) {
       emitBody(part, path, baseType, contentType, sink);
+      state.bodyEmitted = true;
       return;
     }
     if (baseType.equals("message/rfc822")) {
       sink.warn("part " + path
           + " is a nested message/rfc822; emitted as an attachment for the coordinator to reparse");
     }
-    emitAttachment(part, path, baseType, filename, disposition, options, sink, attachments);
+    emitAttachment(part, path, baseType, filename, disposition, options, sink, state);
   }
 
   private static void emitBody(
@@ -144,9 +307,22 @@ public final class EmlParser {
       String disposition,
       ParseOptions options,
       ParseSink sink,
-      Counter attachments) {
+      WalkState state) {
     byte[] payload = payload(part, path, sink);
-    int index = attachments.value++;
+    if (TnefContainer.isTnef(payload)) {
+      // A winmail.dat is a container, not an attachment anyone can open:
+      // its attachments, and its body when the message has none, take its
+      // place. Detected by signature, whatever the part was labelled.
+      TnefContainer.Unpacked unpacked = TnefContainer.unpack(
+          payload, path, !state.bodyEmitted, options, sink, () -> state.attachments++);
+      if (unpacked.readable()) {
+        state.bodyEmitted |= unpacked.emittedBody();
+        return;
+      }
+      sink.warn("part " + path + " is a TNEF (winmail.dat) container that could not be"
+          + " unpacked; emitted as an opaque attachment");
+    }
+    int index = state.attachments++;
     if (filename.isEmpty()) {
       sink.warn("attachment " + index + " at part " + path + " has no filename");
     }
@@ -158,14 +334,7 @@ public final class EmlParser {
         .setSizeBytes(payload.length)
         .setContentId(HeaderProjection.stripAngles(header(part, "Content-ID", "")))
         .setInline(Part.INLINE.equalsIgnoreCase(disposition));
-    if (options.includeAttachmentBytes()) {
-      if (payload.length <= options.maxAttachmentBytes()) {
-        attachment.setData(ByteString.copyFrom(payload));
-      } else {
-        sink.warn("attachment " + index + " (" + payload.length
-            + " bytes) exceeds the per-attachment cap; described without its bytes");
-      }
-    }
+    options.attachPayload(attachment, payload, sink);
     sink.attachment(attachment.build());
   }
 
@@ -186,30 +355,68 @@ public final class EmlParser {
       }
       return new Decoded(String.valueOf(content), declaredCharset);
     } catch (IOException | MessagingException | RuntimeException undecodable) {
-      // An unknown or lying charset must not lose the text. ISO-8859-1 maps
-      // every byte to a code point, so the content survives round-tripping.
-      sink.warn("part " + path + " declared charset '" + declaredCharset
-          + "' which could not be decoded; read as ISO-8859-1");
-      return new Decoded(raw(part, path, StandardCharsets.ISO_8859_1), "iso-8859-1");
+      return recoverText(part, declaredCharset, path, sink);
     }
   }
 
-  private static String raw(Part part, String path, java.nio.charset.Charset charset) {
-    try (InputStream stream = part.getInputStream()) {
-      return new String(stream.readAllBytes(), charset);
+  /**
+   * The text of a body part Jakarta Mail would not decode. Either the
+   * transfer encoding is damaged (a base64 body cut short, an encoding
+   * nobody knows) or the charset is unknown or lying; the two are told apart
+   * here, each is repaired on its own, and the warning names the one that
+   * actually failed. An unknown charset falls back to ISO-8859-1, which maps
+   * every byte to a code point, so the content survives round-tripping.
+   */
+  private static Decoded recoverText(
+      Part part, String declaredCharset, String path, ParseSink sink) {
+    TransferDecoding.Recovered recovered;
+    try {
+      recovered = TransferDecoding.recover(part);
     } catch (IOException | MessagingException unreadable) {
       throw new InvalidEmailException(
           "unreadable body at part " + path + ": " + unreadable.getMessage(), unreadable);
+    }
+    recovered.damage().ifPresent(damage ->
+        sink.warn("part " + path + " has a " + damage + "; the text that decoded was kept"));
+    Charset charset = charset(declaredCharset);
+    if (charset == null) {
+      sink.warn("part " + path + " declared charset '" + declaredCharset
+          + "' which could not be decoded; read as ISO-8859-1");
+      return new Decoded(new String(recovered.bytes(), StandardCharsets.ISO_8859_1), "iso-8859-1");
+    }
+    return new Decoded(new String(recovered.bytes(), charset), declaredCharset);
+  }
+
+  /**
+   * The charset a body declared, or US-ASCII when it declared none (RFC
+   * 2045's default, and Jakarta Mail's). Null when this JVM cannot decode it.
+   */
+  private static Charset charset(String declared) {
+    try {
+      return Charset.forName(declared.isEmpty() ? "us-ascii" : MimeUtility.javaCharset(declared));
+    } catch (IllegalArgumentException unknown) {
+      return null;
     }
   }
 
   private static byte[] payload(Part part, String path, ParseSink sink) {
     try (InputStream stream = part.getInputStream()) {
       return stream.readAllBytes();
-    } catch (IOException | MessagingException unreadable) {
-      sink.warn("attachment payload at part " + path + " is unreadable: "
-          + unreadable.getMessage());
-      return new byte[0];
+    } catch (IOException | MessagingException refused) {
+      // A damaged transfer encoding must not cost the bytes that did decode:
+      // a truncated attachment is still mostly the attachment.
+      try {
+        TransferDecoding.Recovered recovered = TransferDecoding.recover(part);
+        sink.warn("attachment payload at part " + path + " has a "
+            + recovered.damage().orElse("transfer encoding Jakarta Mail refused ("
+                + refused.getMessage() + ")")
+            + "; kept the " + recovered.bytes().length + " bytes that decoded");
+        return recovered.bytes();
+      } catch (IOException | MessagingException unreadable) {
+        sink.warn("attachment payload at part " + path + " is unreadable: "
+            + unreadable.getMessage());
+        return new byte[0];
+      }
     }
   }
 
@@ -231,12 +438,76 @@ public final class EmlParser {
   }
 
   private static String filename(Part part) {
+    String value;
     try {
-      String value = part.getFileName();
-      return value == null ? "" : HeaderProjection.decoded(value).trim();
-    } catch (MessagingException unreadable) {
-      return "";
+      value = part.getFileName();
+    } catch (MessagingException strictGrammarRefused) {
+      value = null;
     }
+    if (value == null || value.isBlank()) {
+      // Jakarta Mail parses parameters strictly, so an unquoted filename
+      // with a space in it fails the whole header and the name is lost.
+      value = lenientParameter(header(part, "Content-Disposition", ""), "filename");
+      if (value.isEmpty()) {
+        value = lenientParameter(header(part, "Content-Type", ""), "name");
+      }
+    }
+    return HeaderProjection.decoded(value).trim();
+  }
+
+  /**
+   * One parameter of a structured header, read the way Jakarta Mail reads
+   * it under {@code mail.mime.parameters.strict=false}: the value runs to
+   * the next semicolon outside quotes, so {@code filename=my report.pdf}
+   * survives. Used only after the strict grammar has refused a header.
+   *
+   * @return the unquoted value, or empty when the parameter is absent
+   */
+  private static String lenientParameter(String header, String name) {
+    String unfolded = MimeUtility.unfold(header);
+    int start = 0;
+    boolean first = true;
+    while (start <= unfolded.length()) {
+      int end = start;
+      boolean quoted = false;
+      while (end < unfolded.length()) {
+        char character = unfolded.charAt(end);
+        if (character == '\\' && quoted && end + 1 < unfolded.length()) {
+          end += 2;
+          continue;
+        }
+        if (character == '"') {
+          quoted = !quoted;
+        } else if (character == ';' && !quoted) {
+          break;
+        }
+        end++;
+      }
+      String segment = unfolded.substring(start, end);
+      int equals = segment.indexOf('=');
+      // The first segment is the type or disposition itself, never a parameter.
+      if (!first && equals > 0 && segment.substring(0, equals).trim().equalsIgnoreCase(name)) {
+        return unquote(segment.substring(equals + 1).trim());
+      }
+      first = false;
+      start = end + 1;
+    }
+    return "";
+  }
+
+  private static String unquote(String value) {
+    if (value.length() < 2 || value.charAt(0) != '"' || value.charAt(value.length() - 1) != '"') {
+      return value;
+    }
+    StringBuilder unquoted = new StringBuilder(value.length());
+    for (int index = 1; index < value.length() - 1; index++) {
+      char character = value.charAt(index);
+      if (character == '\\' && index + 1 < value.length() - 1) {
+        character = value.charAt(++index);
+      }
+      unquoted.append(character);
+    }
+    return unquoted.toString();
   }
 
   private static String header(Part part, String name, String fallback) {
@@ -258,7 +529,7 @@ public final class EmlParser {
       String value = new ContentType(contentType).getParameter(name);
       return value == null ? "" : value.trim();
     } catch (Exception unparseable) {
-      return "";
+      return lenientParameter(contentType, name);
     }
   }
 }

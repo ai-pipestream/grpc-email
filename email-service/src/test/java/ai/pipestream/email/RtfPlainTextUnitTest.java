@@ -3,6 +3,7 @@ package ai.pipestream.email;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import ai.pipestream.email.parse.RtfPlainText;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /** The RTF fallback for .msg bodies that carry neither plain text nor HTML. */
@@ -54,6 +55,26 @@ class RtfPlainTextUnitTest {
   void emptyAndNullInputAreEmpty() {
     assertThat(RtfPlainText.extract(null)).isEmpty();
     assertThat(RtfPlainText.extract("")).isEmpty();
+  }
+
+  @Test
+  @DisplayName("a parameter too long for any integer is clamped, not a NumberFormatException")
+  void anOverlongParameterDoesNotThrow() {
+    assertThat(RtfPlainText.extract("{\\rtf1 \\fs99999999999 hello}")).isEqualTo("hello");
+    assertThat(RtfPlainText.extract("{\\rtf1 \\li-123456789012345678901234567890 indented}"))
+        .isEqualTo("indented");
+  }
+
+  @Test
+  @DisplayName("a \\u escape outside the 16-bit range decodes to nothing, not to garbage")
+  void anOutOfRangeUnicodeEscapeIsDropped() {
+    assertThat(RtfPlainText.extract("{\\rtf1 a\\u99999999999?b}"))
+        .as("the escape is dropped and its fallback character still skipped")
+        .isEqualTo("ab");
+    assertThat(RtfPlainText.extract("{\\rtf1 a\\u-99999?b}")).isEqualTo("ab");
+    assertThat(RtfPlainText.extract("{\\rtf1 \\u-3913?}"))
+        .as("negative values inside the range are still code units")
+        .isEqualTo("\uF0B7");
   }
 
   @Test

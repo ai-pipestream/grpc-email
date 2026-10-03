@@ -212,6 +212,28 @@ final class MsgFixtures {
     }
   }
 
+  /**
+   * A filed message whose one attachment is a winmail.dat nobody unpacked:
+   * a TNEF-encoded internet message saved by a client that kept the
+   * container as it came.
+   */
+  static byte[] withTnefAttachment(byte[] tnef) throws IOException {
+    try (POIFSFileSystem container = new POIFSFileSystem();
+         ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+      DirectoryEntry root = container.getRoot();
+      unicode(root, PID_SUBJECT, SUBJECT);
+      unicode(root, PID_SENDER_NAME, SENDER_NAME);
+      unicode(root, PID_SENDER_EMAIL_ADDRESS, SENDER_EMAIL);
+      unicode(root, PID_BODY, PLAIN_BODY);
+      recipient(root, 0, TO_NAME, TO_EMAIL, RECIPIENT_TO);
+      attachment(root, 0, "winmail.dat", "application/ms-tnef", tnef, "");
+      root.createDocument(PROPERTIES_STREAM,
+          new ByteArrayInputStream(messageProperties(1, 1, List.of())));
+      container.writeFilesystem(out);
+      return out.toByteArray();
+    }
+  }
+
   /** An OLE2 compound file that is not a MAPI message at all. */
   static byte[] ole2ButNotMapi() throws IOException {
     try (POIFSFileSystem container = new POIFSFileSystem();

@@ -66,7 +66,7 @@ Document projection below).
 | `BodyPart` | per text part, in MIME order | `part_id`, `PLAIN`/`HTML` + `content_type_raw`, UTF-8 text, declared charset, MAPI source property for `.msg` |
 | `Attachment` | per attachment, unless `omit_attachment_list` | index, filename, content type, size, content id, inline flag, optional bytes |
 | `Document` | once, immediately before the trailer, only when `emit_document` | the whole message as one `ai.pipestream.document.v1.Document` |
-| `ParseStatus` | last, exactly once | `STATE_OK` / `STATE_PARTIAL`, warnings, counts, message size |
+| `ParseStatus` | last, exactly once | `STATE_OK` / `STATE_PARTIAL`, warnings (the first 100, then a count of the rest), counts, message size |
 
 Format is detected from the bytes (OLE2 signature, or an RFC 822 header block
 that carries at least one real mail field). The advisory content type is never
@@ -81,10 +81,16 @@ advertisement the demo shell reads to build its tab bar.
 
 | Code | Cause |
 |---|---|
-| `INVALID_ARGUMENT` | no bytes, no `complete` chunk, a chunk before options, repeated options, headers that never ended, a corrupt or truncated container |
+| `INVALID_ARGUMENT` | no bytes, no `complete` chunk, a chunk before options, repeated options, headers that never ended, a corrupt or truncated container, structure nested too deeply for a parsing library to follow |
 | `UNIMPLEMENTED` | bytes are not email (including an OLE2 file that is not MAPI) |
-| `RESOURCE_EXHAUSTED` | over the effective byte cap |
+| `RESOURCE_EXHAUSTED` | over the effective byte cap, or a parse that ran out of memory |
+| `DEADLINE_EXCEEDED` | the upload made no progress for the idle timeout while the server waited for it (empty chunks do not count) |
 | `INTERNAL` | unexpected parser fault |
+
+Every call ends with a status: an `Error` thrown mid-parse (a
+`StackOverflowError`, an `OutOfMemoryError`) is mapped like any other
+failure instead of escaping the parse thread and leaving the client to wait
+for its deadline.
 
 `grpc.health.v1.Health` and server reflection (v1 and v1alpha) are registered.
 
@@ -122,7 +128,8 @@ becomes one `TextItem` per blank-line-separated paragraph, tagged with its
 `attachments`, one line per attachment. An inline image (`inline`, `image/*`,
 with a content id) becomes a `PictureItem` whose `ImageRef.uri` is
 **`part:<part_id>`**, a pointer into the typed stream you are already reading
-(`part:1.3` for a MIME path, `part:attach:1` for a MAPI storage). Bytes are
+(`part:1.3` for a MIME path, `part:attach:1` for a MAPI storage,
+`part:1.2/attach:0` for an attachment unpacked from a winmail.dat). Bytes are
 never embedded: a Document is one gRPC message, and attachment payloads
 belong on `Attachment.data`.
 
@@ -133,10 +140,32 @@ an invented page number.
 
 ## Formats
 
-- **`.eml`**: Jakarta Mail over a `ByteArrayInputStream`, with the lenient
-  MIME properties real mailboxes need. Encoded-word headers and filenames are
-  decoded; a part whose declared charset does not exist is read as ISO-8859-1
-  with a warning rather than failing.
+- **`.eml`**: Jakarta Mail over the in-memory bytes, with the leniency real
+  mailboxes need applied per part rather than through Jakarta Mail's
+  JVM-wide System properties (which it reads instead of the `Session`). One
+  damaged part never fails the message: a base64 or uuencoded part cut short
+  keeps every byte that decoded, a part with an unknown
+  `Content-Transfer-Encoding` keeps its bytes undecoded, and a part whose
+  declared charset does not exist is read as ISO-8859-1, each with a
+  `STATE_PARTIAL` warning naming what was repaired. Encoded words decode even
+  when a mailer glued them to the surrounding text, an unquoted filename with
+  spaces survives the strict parameter grammar, and a multipart that carries
+  no parts keeps its text as a plain body. Multipart nesting is walked at most
+  32 levels deep and over at most eight times the message's size in
+  multipart bytes (Jakarta Mail rescans each level to find its boundaries);
+  a subtree past either bound is emitted whole, as one opaque attachment,
+  with a warning.
+- **TNEF (`winmail.dat`, `application/ms-tnef`)**, in either format: an
+  attachment whose bytes carry the TNEF signature is unpacked, whatever it
+  was labelled. The attachments inside it take its place, named under the
+  container's part path (`1.2/attach:0`, or `attach:3/attach:0` inside a
+  `.msg`); its body is used only when the message has none of its own
+  (plain or HTML as stored, RTF reduced to plain text with a warning, part
+  ids like `1.2/body:rtf`). The records are framed here and only the MAPI
+  property lists go to POI's HMEF, so one damaged record costs only itself
+  and a container cut short keeps everything before the cut. Bytes that
+  carry the signature but no readable record stay one opaque attachment,
+  with a warning. Nothing inside a container is unpacked in turn.
 - **`.msg`**: POI `MAPIMessage`. Recipients are role-tagged from
   `PidTagRecipientType` (1 to / 2 cc / 3 bcc). Bodies come from `PidTagBody`
   and `PidTagHtml`; HTML wins over RTF, and an RTF-only message gets
@@ -159,7 +188,9 @@ place (their bytes are handed over so the coordinator can re-parse them).
 | `GRPC_EMAIL_PORT` | `50054` | Listen port |
 | `GRPC_EMAIL_MAX_DOCUMENT_MIB` | `64` | Per-message byte cap (`RESOURCE_EXHAUSTED` above it) |
 | `GRPC_EMAIL_MAX_ATTACHMENT_MIB` | `32` | Per-attachment payload cap for `include_attachment_bytes`; larger attachments are still described, just without their bytes |
-| `GRPC_EMAIL_MAX_CONCURRENT_PARSES` | `max(2, CPU cores)` | Parses in flight before queueing |
+| `GRPC_EMAIL_MAX_CONCURRENT_PARSES` | `max(2, CPU cores)` | Calls admitted at once, upload and parse together; further calls wait, unread |
+| `GRPC_EMAIL_IDLE_TIMEOUT_SECONDS` | `30` | Longest wait for the upload to make progress (options, a chunk with bytes, the complete chunk); an empty chunk does not reset it. Past it the call ends with `DEADLINE_EXCEEDED` and frees its parse slot. A call waiting for a slot is not timed: nobody is reading it yet |
+| `GRPC_EMAIL_UPLOAD_TIMEOUT_SECONDS` | `300` | Longest a call's whole upload may take, counted from the moment it holds its parse slot; past it the call ends with `DEADLINE_EXCEEDED` and frees its slot, however steadily it was sending |
 | `GRPC_EMAIL_METRICS_INTERVAL_SECONDS` | `60` | Metrics line interval, `0` disables |
 
 Metrics are a stdout line on the interval:
@@ -210,17 +241,42 @@ npm start                  # http://127.0.0.1:8090, bridge to 127.0.0.1:50054
 ## Concurrency model
 
 One parse per request on a virtual thread, with a semaphore bounding how many
-run at once. The bound protects heap, not CPU: MIME trees and MAPI property
-maps are held whole in memory. A poisoned message fails its own RPC and
-nothing else.
+calls are in flight. The bound protects heap, not CPU: the upload buffer, the
+MIME tree and the MAPI property maps are all held whole in memory, so a call
+takes its slot when its options arrive, before a single chunk is read, and
+keeps it until its trailer or its error. A call queued behind a busy server
+is simply not read: gRPC flow control leaves its bytes in the client's send
+window, so waiting callers hold no buffers. A poisoned message fails its own
+RPC and nothing else.
+
+A client that cancels, or whose deadline passes, stops its parse at the next
+part and gives the slot back at once; nothing more is written to it. A
+client that simply stops sending mid-upload, deadline or not, is ended with
+`DEADLINE_EXCEEDED` once the idle timeout passes with no progress
+(`GRPC_EMAIL_IDLE_TIMEOUT_SECONDS`, 30 s, as in the fleet's other
+collectors), and its slot comes back. Empty chunks are not progress, so a
+client cannot keep its slot by trickling them. Nor can it by trickling
+bytes: once admitted, the whole upload must finish within the upload timeout
+(`GRPC_EMAIL_UPLOAD_TIMEOUT_SECONDS`, 300 s), or the call ends with
+`DEADLINE_EXCEEDED` and its slot comes back.
 
 ## Tests
 
-`./gradlew test` runs 123 tests with no network and no committed binaries.
+`./gradlew test` runs 162 tests with no network and no committed binaries.
 Fixtures are authored in memory: Jakarta Mail writes the `.eml`, and
 `MsgFixtures` builds `.msg` bytes from the MS-OXMSG layout up (compound-file
 streams, property chunks, recipient and attachment storages, an uncompressed
 `PidTagRtfCompressed` stream), because POI can read `.msg` but not write one.
+`TnefFixtures` does the same for `winmail.dat`, from the MS-OXTNEF layout.
+
+Damaged and hostile input is written by hand: a base64 body or attachment
+cut short, an unknown transfer encoding, an unquoted filename, a multipart
+with no parts, nesting past the depth cap and past the scan budget, an
+overlong RTF parameter, and TNEF containers that are whole, cut short,
+unreadable or flooded with empty slots. `ServiceRobustnessTest` throws
+`Error`s onto the parse thread and cancels, expires, stalls and queues calls
+against a one-slot server, so a call that never ends or a slot that never
+comes back stalls the suite.
 
 The liveness assertions are load-bearing: one test half-uploads a message and
 requires the envelope to arrive before the rest is sent, another requires

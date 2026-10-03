@@ -54,8 +54,10 @@ flowchart LR
     out --> client
 ```
 
-One parse runs on one virtual thread; a semaphore bounds parses in flight
-to protect heap. Format detection reads bytes only, never the advisory
+One parse runs on one virtual thread; a semaphore bounds calls in flight,
+from the first chunk read to the trailer, to protect heap. A call waiting for
+its slot is not read at all, and a cancelled call stops between parts and
+frees its slot. Format detection reads bytes only, never the advisory
 content type.
 
 ## What this process owns
@@ -99,8 +101,12 @@ gRPC status, never a 200 with a partial lie:
 
 - `INVALID_ARGUMENT`: no bytes, truncated MIME, missing complete flag
 - `UNIMPLEMENTED`: not email
-- `RESOURCE_EXHAUSTED`: over the byte cap
+- `RESOURCE_EXHAUSTED`: over the byte cap, or out of memory mid-parse
+- `DEADLINE_EXCEEDED`: the client stalled mid-upload past the idle timeout,
+  or its upload was still open when the upload timeout ran out
 - `INTERNAL`: parser fault
+
+Every call ends with one of these, whatever the parse throws.
 
 A failed collector is a `CollectorFailure` on the gRParse stream. It
 does not fail the parse while another collector succeeds.

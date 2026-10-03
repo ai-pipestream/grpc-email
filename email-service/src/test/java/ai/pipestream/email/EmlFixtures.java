@@ -102,6 +102,179 @@ final class EmlFixtures {
         + "the bytes are still readable\r\n").getBytes(StandardCharsets.US_ASCII);
   }
 
+  /** Header block shared by the hand-written damaged fixtures below. */
+  private static String handWrittenHeaders(String subject) {
+    return "From: " + FROM_EMAIL + "\r\n"
+        + "To: " + TO_EMAIL + "\r\n"
+        + "Subject: " + subject + "\r\n"
+        + "Message-ID: <" + MESSAGE_ID + ">\r\n"
+        + "MIME-Version: 1.0\r\n";
+  }
+
+  /**
+   * A text/plain body whose base64 lost its final padding character, the
+   * shape a size-capped archiver leaves behind: "hello world" with its last
+   * group three characters long. Written by hand because Jakarta Mail only
+   * writes well-formed base64.
+   */
+  static byte[] truncatedBase64Body() {
+    return (handWrittenHeaders("cut base64")
+        + "Content-Type: text/plain; charset=utf-8\r\n"
+        + "Content-Transfer-Encoding: base64\r\n"
+        + "\r\n"
+        + "aGVsbG8gd29ybGQ\r\n").getBytes(StandardCharsets.US_ASCII);
+  }
+
+  /** A body declaring a transfer encoding no decoder knows. */
+  static byte[] unknownTransferEncoding() {
+    return (handWrittenHeaders("weird encoding")
+        + "Content-Type: text/plain; charset=us-ascii\r\n"
+        + "Content-Transfer-Encoding: x-weird\r\n"
+        + "\r\n"
+        + "the text is still plain\r\n").getBytes(StandardCharsets.US_ASCII);
+  }
+
+  /** The payload {@link #truncatedBase64Attachment} encodes, before the cut. */
+  static final byte[] TRUNCATED_PAYLOAD =
+      "%PDF-1.4 the start of a longer document".getBytes(StandardCharsets.US_ASCII);
+
+  /** How many base64 characters of the payload survive the cut. */
+  static final int TRUNCATED_BASE64_CHARS = 30;
+
+  /**
+   * A body and a base64 attachment cut off mid-group, as a message truncated
+   * by a broken relay arrives: no closing boundary, and an attachment whose
+   * last group of base64 is two characters short.
+   */
+  static byte[] truncatedBase64Attachment() {
+    String encoded = java.util.Base64.getEncoder().encodeToString(TRUNCATED_PAYLOAD)
+        .substring(0, TRUNCATED_BASE64_CHARS);
+    return (handWrittenHeaders("cut attachment")
+        + "Content-Type: multipart/mixed; boundary=\"cut\"\r\n"
+        + "\r\n"
+        + "--cut\r\n"
+        + "Content-Type: text/plain; charset=us-ascii\r\n"
+        + "\r\n"
+        + PLAIN_BODY_ASCII + "\r\n"
+        + "--cut\r\n"
+        + "Content-Type: application/pdf; name=\"order.pdf\"\r\n"
+        + "Content-Disposition: attachment; filename=\"order.pdf\"\r\n"
+        + "Content-Transfer-Encoding: base64\r\n"
+        + "\r\n"
+        + encoded + "\r\n").getBytes(StandardCharsets.US_ASCII);
+  }
+
+  /** An ASCII body for the hand-written fixtures. */
+  static final String PLAIN_BODY_ASCII = "The hearing begins at 09:00.";
+
+  /**
+   * An attachment whose filename has spaces and no quotes, which the strict
+   * MIME parameter grammar rejects outright.
+   */
+  static byte[] unquotedFilename() {
+    return (handWrittenHeaders("unquoted filename")
+        + "Content-Type: multipart/mixed; boundary=\"b1\"\r\n"
+        + "\r\n"
+        + "--b1\r\n"
+        + "Content-Type: text/plain; charset=us-ascii\r\n"
+        + "\r\n"
+        + PLAIN_BODY_ASCII + "\r\n"
+        + "--b1\r\n"
+        + "Content-Type: application/pdf; name=my report.pdf\r\n"
+        + "Content-Disposition: attachment; filename=my report.pdf\r\n"
+        + "\r\n"
+        + "%PDF-1.4\r\n"
+        + "--b1--\r\n").getBytes(StandardCharsets.US_ASCII);
+  }
+
+  /**
+   * A message that claims to be multipart but never writes its boundary, so
+   * its whole text is preamble: Jakarta Mail's strict parser calls this a
+   * missing start boundary and fails the message.
+   */
+  static byte[] multipartWithoutParts() {
+    return (handWrittenHeaders("no parts")
+        + "Content-Type: multipart/mixed; boundary=\"never-written\"\r\n"
+        + "\r\n"
+        + PLAIN_BODY_ASCII + "\r\n").getBytes(StandardCharsets.US_ASCII);
+  }
+
+  /**
+   * A message whose second part opens a chain of {@code levels} multiparts,
+   * each nothing but the next, with one text part at the bottom. A level
+   * costs about sixty bytes, which is what makes nesting cheap to send and
+   * expensive to walk. The first part is plain text padded with {@code
+   * fillerBytes} of filler, so a test can make the chain small or large next
+   * to the message around it.
+   */
+  static byte[] nestedMultiparts(int levels, int fillerBytes) {
+    StringBuilder message = new StringBuilder(levels * 64 + fillerBytes + 512)
+        .append(handWrittenHeaders("nested " + levels))
+        .append("Content-Type: multipart/mixed; boundary=\"b0\"\r\n\r\n")
+        .append("--b0\r\nContent-Type: text/plain; charset=us-ascii\r\n\r\n")
+        .append(PLAIN_BODY_ASCII).append("\r\n");
+    while (fillerBytes > 0) {
+      String line = "filler filler filler filler filler filler filler filler filler\r\n";
+      message.append(line);
+      fillerBytes -= line.length();
+    }
+    message.append("--b0\r\n");
+    for (int level = 1; level <= levels; level++) {
+      message.append("Content-Type: multipart/mixed; boundary=\"b").append(level).append("\"\r\n\r\n")
+          .append("--b").append(level).append("\r\n");
+    }
+    message.append("Content-Type: text/plain; charset=us-ascii\r\n\r\nthe bottom\r\n");
+    for (int level = levels; level >= 0; level--) {
+      message.append("--b").append(level).append("--\r\n");
+    }
+    return message.toString().getBytes(StandardCharsets.US_ASCII);
+  }
+
+  /** A text body followed by {@code count} small named attachments. */
+  static byte[] manyAttachments(int count) throws Exception {
+    MimeMessage message = envelope();
+    MimeMultipart mixed = new MimeMultipart("mixed");
+    MimeBodyPart body = new MimeBodyPart();
+    body.setText(PLAIN_BODY, "UTF-8");
+    mixed.addBodyPart(body);
+    for (int index = 0; index < count; index++) {
+      MimeBodyPart attachment = new MimeBodyPart();
+      attachment.setDataHandler(new DataHandler(
+          new ByteArrayDataSource(ATTACHMENT_BYTES, "application/pdf")));
+      attachment.setFileName("exhibit-" + index + ".pdf");
+      attachment.setDisposition(Message.ATTACHMENT);
+      mixed.addBodyPart(attachment);
+    }
+    message.setContent(mixed);
+    return bytes(message);
+  }
+
+  /**
+   * A rich-text Outlook message as it reaches internet mail: a plain-text
+   * rendering of the body, with the real body and the attachments packed
+   * into a winmail.dat beside it.
+   */
+  static byte[] withWinmailDat(byte[] tnef) throws Exception {
+    MimeMessage message = envelope();
+    MimeBodyPart body = new MimeBodyPart();
+    body.setText(PLAIN_BODY, "UTF-8");
+    MimeBodyPart winmail = new MimeBodyPart();
+    winmail.setDataHandler(new DataHandler(new ByteArrayDataSource(tnef, "application/ms-tnef")));
+    winmail.setFileName("winmail.dat");
+    MimeMultipart mixed = new MimeMultipart("mixed");
+    mixed.addBodyPart(body);
+    mixed.addBodyPart(winmail);
+    message.setContent(mixed);
+    return bytes(message);
+  }
+
+  /** A message that is nothing but a TNEF container, as Exchange sends some. */
+  static byte[] tnefOnly(byte[] tnef) throws Exception {
+    MimeMessage message = envelope();
+    message.setDataHandler(new DataHandler(new ByteArrayDataSource(tnef, "application/ms-tnef")));
+    return bytes(message);
+  }
+
   /** An attachment part with no filename, which must warn rather than fail. */
   static byte[] unnamedAttachment() throws Exception {
     MimeMessage message = envelope();

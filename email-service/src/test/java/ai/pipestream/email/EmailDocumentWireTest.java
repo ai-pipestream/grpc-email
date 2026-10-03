@@ -247,6 +247,23 @@ class EmailDocumentWireTest {
   }
 
   @Test
+  @DisplayName("attachments unpacked from a winmail.dat reach the document like any other")
+  void tnefAttachmentsAreRegisteredInTheDocument() throws Exception {
+    List<ParseEmailResponse> events =
+        parse(EmlFixtures.withWinmailDat(TnefFixtures.winmailDat(true)), true);
+    Document document = onlyDocument(events);
+
+    assertAgreesWithEvents(events, document, "eml", "message/rfc822");
+    assertThat(document.getAttachmentsList())
+        .as("the fan-out registry names what the container carried, not the container")
+        .extracting(ai.pipestream.document.v1.SubDocumentRef::getId,
+            ai.pipestream.document.v1.SubDocumentRef::getName)
+        .containsExactly(
+            tuple("part:1.2/attach:0", TnefFixtures.ORDER_LONG_NAME),
+            tuple("part:1.2/attach:1", TnefFixtures.SEAL_NAME));
+  }
+
+  @Test
   @DisplayName("the .eml envelope reaches the document as typed parties and instants")
   void emlFillsTheTypedEmailBlock() throws Exception {
     List<ParseEmailResponse> events = parse(EmlFixtures.multipartWithAttachments(), true);

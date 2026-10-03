@@ -9,6 +9,10 @@
 FROM dhi.io/eclipse-temurin:25-jdk-dev AS build
 WORKDIR /src
 COPY . .
+# The Gradle distribution this downloads is pinned: the wrapper refuses any
+# zip whose SHA-256 differs from distributionSha256Sum in
+# gradle/wrapper/gradle-wrapper.properties (the published checksum of the
+# version in distributionUrl), so a bump must change both together.
 RUN ./gradlew --no-daemon build :email-service:installDist
 
 # Runtime: non-root by default, nothing writable needed. The server is

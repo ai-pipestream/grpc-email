@@ -70,6 +70,25 @@ Events, in order:
 
 Health + reflection, same as the other collectors.
 
+### TNEF containers
+
+A `winmail.dat` (`application/ms-tnef`) is a container, not an attachment
+anyone can open, so an attachment whose bytes carry the TNEF signature is
+unpacked in place, in `.eml` and `.msg` alike. The attachments it carries are
+emitted as ordinary `Attachment` events whose `part_id` is the container's own
+part id plus `/attach:<n>`; the container itself is not listed. Its body
+(`PidTagBody` or `attBody`, `PidTagHtml`, or `PidTagRtfCompressed` reduced to
+plain text with a warning, exactly as a `.msg` body is chosen) is emitted only
+when the message has emitted no body of its own, because a rich-text message
+normally carries a plain rendering of the same body beside its container;
+those parts are `<part_id>/body:plain|html|rtf` and set `source_property`.
+Records are framed here and only MAPI property lists are decoded by POI's
+HMEF, whose own reader drops every attachment when one record is damaged;
+here a damaged record is skipped, one warning per container counting them
+all, and a stream cut short keeps what came before the cut. A container
+with no readable record is described as the opaque attachment it then is.
+Nothing found inside a container is unpacked again.
+
 ## 4. Mapping to Document
 
 **Implemented in this repo** as `ai.pipestream.email.document.EmailDocumentFold`,

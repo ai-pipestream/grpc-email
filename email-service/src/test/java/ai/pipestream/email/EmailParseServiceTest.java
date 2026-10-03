@@ -2,6 +2,7 @@ package ai.pipestream.email;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import ai.pipestream.email.parse.EmlParser;
 import ai.pipestream.email.server.EmailParseServiceImpl;
 import ai.pipestream.email.v1.Address;
 import ai.pipestream.email.v1.AddressRole;
@@ -452,6 +453,163 @@ class EmailParseServiceTest {
         .anyMatch(warning -> warning.contains("charset"));
   }
 
+  // --- damaged transfer encodings: one bad part never fails the message ----
+
+  @Test
+  @DisplayName("a base64 body that lost its padding keeps its text and says so")
+  void truncatedBase64BodyKeepsItsText() throws Exception {
+    Result result = parseWhole(EmlFixtures.truncatedBase64Body(), "eml-cut-base64");
+    assertThat(result.bodies()).hasSize(1);
+    assertThat(result.bodies().get(0).getText())
+        .as("the final short group still determines its two bytes")
+        .isEqualTo("hello world");
+    assertThat(result.bodies().get(0).getCharset()).isEqualTo("utf-8");
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
+    assertThat(result.status().getWarningsList())
+        .as("the warning blames the transfer encoding, not the charset")
+        .anyMatch(warning -> warning.contains("damaged base64"))
+        .noneMatch(warning -> warning.contains("charset"));
+  }
+
+  @Test
+  @DisplayName("an unknown Content-Transfer-Encoding keeps the bytes undecoded")
+  void unknownTransferEncodingKeepsTheBytes() throws Exception {
+    Result result = parseWhole(EmlFixtures.unknownTransferEncoding(), "eml-weird-cte");
+    assertThat(result.bodies()).hasSize(1);
+    assertThat(result.bodies().get(0).getText()).isEqualTo("the text is still plain\r\n");
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
+    assertThat(result.status().getWarningsList())
+        .anyMatch(warning -> warning.contains("unknown Content-Transfer-Encoding 'x-weird'"));
+  }
+
+  @Test
+  @DisplayName("a truncated base64 attachment keeps every byte that decoded")
+  void truncatedBase64AttachmentKeepsItsDecodedBytes() throws Exception {
+    byte[] message = EmlFixtures.truncatedBase64Attachment();
+    Result result = parse(message, ParseEmailOptions.newBuilder()
+        .setDocumentId("eml-cut-attachment").setIncludeAttachmentBytes(true).build(),
+        message.length);
+    assertThat(result.error()).as("one damaged attachment must not fail the message").isNull();
+    assertThat(result.bodies()).hasSize(1);
+    assertThat(result.bodies().get(0).getText().strip()).isEqualTo(EmlFixtures.PLAIN_BODY_ASCII);
+
+    // 30 base64 characters: seven whole groups (21 bytes) and a two-character
+    // group that still determines one more byte.
+    int recoverable = 22;
+    byte[] expected = java.util.Arrays.copyOf(EmlFixtures.TRUNCATED_PAYLOAD, recoverable);
+    assertThat(result.attachments()).hasSize(1);
+    Attachment attachment = result.attachments().get(0);
+    assertThat(attachment.getFilename()).isEqualTo("order.pdf");
+    assertThat(attachment.getSizeBytes())
+        .as("the size used to read 0, every decodable byte dropped")
+        .isEqualTo(recoverable);
+    assertThat(attachment.getData().toByteArray()).isEqualTo(expected);
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
+    assertThat(result.status().getWarningsList())
+        .anyMatch(warning -> warning.contains("damaged base64")
+            && warning.contains("kept the " + recoverable + " bytes"));
+  }
+
+  @Test
+  @DisplayName("an unquoted filename with spaces survives the strict parameter grammar")
+  void unquotedFilenameSurvives() throws Exception {
+    Result result = parseWhole(EmlFixtures.unquotedFilename(), "eml-unquoted");
+    assertThat(result.attachments()).hasSize(1);
+    assertThat(result.attachments().get(0).getFilename()).isEqualTo("my report.pdf");
+    assertThat(result.status().getWarningsList())
+        .as("the name was recovered, so nothing claims it was missing")
+        .noneMatch(warning -> warning.contains("no filename"));
+  }
+
+  @Test
+  @DisplayName("a multipart that never writes its boundary keeps its text as the body")
+  void multipartWithoutPartsKeepsItsText() throws Exception {
+    Result result = parseWhole(EmlFixtures.multipartWithoutParts(), "eml-no-parts");
+    assertThat(result.bodies()).hasSize(1);
+    BodyPart body = result.bodies().get(0);
+    assertThat(body.getMediaType()).isEqualTo(BodyMediaType.BODY_MEDIA_TYPE_PLAIN);
+    assertThat(body.getText()).isEqualTo(EmlFixtures.PLAIN_BODY_ASCII);
+    assertThat(body.getContentTypeRaw())
+        .as("the declared type stays honest about what the part claimed to be")
+        .isEqualTo("multipart/mixed");
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
+    assertThat(result.status().getWarningsList())
+        .anyMatch(warning -> warning.contains("carries no parts"));
+  }
+
+  // --- hostile structure --------------------------------------------------
+
+  /** Filler that makes a short nesting chain small next to its message. */
+  private static final int FILLER_BYTES = 64 * 1024;
+
+  @Test
+  @DisplayName("nesting within the cap is walked to the bottom")
+  void nestingWithinTheCapIsWalked() throws Exception {
+    // The root and this chain are exactly MAX_MULTIPART_DEPTH multiparts
+    // deep, the most the walk descends: nothing is refused.
+    int levels = EmlParser.MAX_MULTIPART_DEPTH - 1;
+    Result result = parseWhole(EmlFixtures.nestedMultiparts(levels, FILLER_BYTES), "eml-nest-ok");
+    assertThat(result.bodies()).hasSize(2);
+    assertThat(result.bodies().get(1).getText()).isEqualTo("the bottom");
+    assertThat(result.attachments()).isEmpty();
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_OK);
+  }
+
+  @Test
+  @DisplayName("nesting past the depth cap is cut off with a warning, not a crash")
+  void nestingPastTheDepthCapIsCutOff() throws Exception {
+    int levels = EmlParser.MAX_MULTIPART_DEPTH + 8;
+    Result result = parseWhole(EmlFixtures.nestedMultiparts(levels, FILLER_BYTES), "eml-nest-cap");
+    assertThat(result.bodies())
+        .as("the parts above the cut still stream; the bottom is inside the cut subtree")
+        .hasSize(1);
+    assertThat(result.bodies().get(0).getText()).startsWith(EmlFixtures.PLAIN_BODY_ASCII);
+    assertThat(result.attachments()).hasSize(1);
+    Attachment subtree = result.attachments().get(0);
+    assertThat(subtree.getContentType()).isEqualTo("multipart/mixed");
+    assertThat(subtree.getPartId())
+        .as("the first multipart past the cap is the one handed over whole")
+        .isEqualTo("1.2" + ".1".repeat(EmlParser.MAX_MULTIPART_DEPTH - 1));
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
+    assertThat(result.status().getWarningsList())
+        .anyMatch(warning -> warning.contains(
+            "nests multiparts deeper than " + EmlParser.MAX_MULTIPART_DEPTH + " levels"));
+  }
+
+  @Test
+  @DisplayName("a megabyte of full-size nesting stops at the scan budget, quickly")
+  void fullSizeNestingStopsAtTheScanBudget() throws Exception {
+    // About sixty bytes a level: a megabyte of nesting used to burn twelve
+    // seconds of CPU rescanning each level and end in a StackOverflowError
+    // reported as INTERNAL.
+    byte[] message = EmlFixtures.nestedMultiparts(20_000, 0);
+    assertThat(message.length).isGreaterThan(1_000_000).isLessThan((int) MESSAGE_CAP);
+
+    long started = System.nanoTime();
+    Result result = parse(message, listing("eml-nest-deep"), 64 * 1024);
+    long elapsedMillis = (System.nanoTime() - started) / 1_000_000;
+
+    assertThat(result.error()).as("over-deep nesting is degraded, never a fault").isNull();
+    assertThat(result.bodies())
+        .as("the parts above the cut still stream")
+        .extracting(BodyPart::getText)
+        .containsExactly(EmlFixtures.PLAIN_BODY_ASCII);
+    assertThat(result.attachments()).hasSize(1);
+    Attachment subtree = result.attachments().get(0);
+    assertThat(subtree.getContentType()).isEqualTo("multipart/mixed");
+    assertThat(subtree.getSizeBytes())
+        .as("the cut subtree's bytes are kept, not dropped")
+        .isGreaterThan(1_000_000);
+    assertThat(subtree.getPartId().split("\\.").length)
+        .as("each level of this chain is nearly the whole message, so the budget cuts it early")
+        .isLessThanOrEqualTo(EmlParser.MAX_MULTIPART_SCAN_FACTOR + 1);
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
+    assertThat(result.status().getWarningsList())
+        .anyMatch(warning -> warning.contains("would take the multipart scan past "
+            + EmlParser.MAX_MULTIPART_SCAN_FACTOR + " times the message's size"));
+    assertThat(elapsedMillis).isLessThan(10_000);
+  }
+
   @Test
   void unnamedAttachmentWarnsButStillStreams() throws Exception {
     Result result = parseWhole(EmlFixtures.unnamedAttachment(), "eml-unnamed");
@@ -460,6 +618,193 @@ class EmailParseServiceTest {
     assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
     assertThat(result.status().getWarningsList())
         .anyMatch(warning -> warning.contains("no filename"));
+  }
+
+  // --- TNEF (winmail.dat) -------------------------------------------------
+
+  @Test
+  @DisplayName("a winmail.dat is replaced by the attachments it carries")
+  void winmailDatIsUnpackedIntoItsAttachments() throws Exception {
+    byte[] message = EmlFixtures.withWinmailDat(TnefFixtures.winmailDat(true));
+    Result result = parse(message, ParseEmailOptions.newBuilder()
+        .setDocumentId("eml-tnef").setIncludeAttachmentBytes(true).build(), message.length);
+    assertThat(result.error()).isNull();
+
+    assertThat(result.bodies())
+        .as("the message has its own body, so the container's copy of it is not repeated")
+        .extracting(BodyPart::getText)
+        .containsExactly(EmlFixtures.PLAIN_BODY);
+
+    List<Attachment> attachments = result.attachments();
+    assertThat(attachments)
+        .as("the container itself is gone; what it carried takes its place")
+        .extracting(Attachment::getFilename)
+        .containsExactly(TnefFixtures.ORDER_LONG_NAME, TnefFixtures.SEAL_NAME);
+    Attachment order = attachments.get(0);
+    assertThat(order.getPartId()).isEqualTo("1.2/attach:0");
+    assertThat(order.getIndex()).isZero();
+    assertThat(order.getContentType()).isEqualTo("application/pdf");
+    assertThat(order.getData().toByteArray()).isEqualTo(TnefFixtures.ORDER_BYTES);
+    assertThat(order.getInline()).isFalse();
+    Attachment seal = attachments.get(1);
+    assertThat(seal.getPartId()).isEqualTo("1.2/attach:1");
+    assertThat(seal.getIndex()).isEqualTo(1);
+    assertThat(seal.getContentId()).isEqualTo(TnefFixtures.SEAL_CONTENT_ID);
+    assertThat(seal.getInline()).isTrue();
+    assertThat(seal.getContentType()).as("no MIME tag was stored, and none is invented").isEmpty();
+    assertThat(seal.getData().toByteArray()).isEqualTo(TnefFixtures.SEAL_BYTES);
+
+    ParseStatus status = result.status();
+    assertThat(status.getState()).isEqualTo(ParseStatus.State.STATE_OK);
+    assertThat(status.getAttachments()).isEqualTo(2);
+    assertThat(status.getAttachmentBytes())
+        .isEqualTo(TnefFixtures.ORDER_BYTES.length + TnefFixtures.SEAL_BYTES.length);
+  }
+
+  @Test
+  @DisplayName("a winmail.dat's attachments are sized but carry no bytes unless asked for")
+  void winmailDatAttachmentsCarryNoBytesUnlessAsked() throws Exception {
+    byte[] message = EmlFixtures.withWinmailDat(TnefFixtures.winmailDat(true));
+    Result result = parse(message, ParseEmailOptions.newBuilder()
+        .setDocumentId("eml-tnef-listed").build(), message.length);
+    assertThat(result.error()).isNull();
+    assertThat(result.attachments())
+        .extracting(Attachment::getSizeBytes)
+        .containsExactly((long) TnefFixtures.ORDER_BYTES.length,
+            (long) TnefFixtures.SEAL_BYTES.length);
+    assertThat(result.attachments())
+        .as("listing alone never copies a payload onto the wire")
+        .allMatch(attachment -> attachment.getData().isEmpty());
+  }
+
+  @Test
+  @DisplayName("a message that is only a TNEF container takes its body from it")
+  void tnefOnlyMessageTakesItsBodyFromTheContainer() throws Exception {
+    Result result = parseWhole(EmlFixtures.tnefOnly(TnefFixtures.winmailDat(true)), "eml-tnef-only");
+    assertThat(result.bodies()).hasSize(1);
+    BodyPart body = result.bodies().get(0);
+    assertThat(body.getMediaType()).isEqualTo(BodyMediaType.BODY_MEDIA_TYPE_PLAIN);
+    assertThat(body.getText())
+        .as("attBody is 8-bit text in the stream's code page, umlauts included")
+        .isEqualTo(TnefFixtures.PLAIN_BODY);
+    assertThat(body.getPartId()).isEqualTo("1/body:plain");
+    assertThat(body.getSourceProperty()).isEqualTo("PidTagBody");
+    assertThat(result.attachments()).hasSize(2);
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_OK);
+  }
+
+  @Test
+  @DisplayName("a TNEF container with only an RTF body yields its text, and says so")
+  void tnefRtfBodyIsExtracted() throws Exception {
+    Result result = parseWhole(EmlFixtures.tnefOnly(TnefFixtures.winmailDat(false)), "eml-tnef-rtf");
+    assertThat(result.bodies()).hasSize(1);
+    BodyPart body = result.bodies().get(0);
+    assertThat(body.getText()).isEqualTo(TnefFixtures.RTF_BODY_TEXT);
+    assertThat(body.getPartId()).isEqualTo("1/body:rtf");
+    assertThat(body.getSourceProperty()).isEqualTo("PidTagRtfCompressed");
+    assertThat(result.status().getWarningsList()).anyMatch(warning -> warning.contains("RTF-only"));
+  }
+
+  @Test
+  @DisplayName("a winmail.dat cut short keeps everything before the cut")
+  void truncatedWinmailDatKeepsWhatCameBeforeTheCut() throws Exception {
+    byte[] tnef = TnefFixtures.winmailDat(true);
+    // Twenty bytes short: the cut lands inside the last record, the inline
+    // image's MAPI properties. A reader that needs the whole stream loses
+    // both attachments here.
+    byte[] cut = java.util.Arrays.copyOf(tnef, tnef.length - 20);
+    byte[] message = EmlFixtures.withWinmailDat(cut);
+    Result result = parse(message, ParseEmailOptions.newBuilder()
+        .setDocumentId("eml-tnef-cut").setIncludeAttachmentBytes(true).build(), message.length);
+    assertThat(result.error()).isNull();
+    assertThat(result.attachments())
+        .extracting(Attachment::getFilename)
+        .containsExactly(TnefFixtures.ORDER_LONG_NAME, TnefFixtures.SEAL_NAME);
+    assertThat(result.attachments().get(0).getData().toByteArray())
+        .isEqualTo(TnefFixtures.ORDER_BYTES);
+    assertThat(result.attachments().get(1).getData().toByteArray())
+        .as("the image's data record came before the cut")
+        .isEqualTo(TnefFixtures.SEAL_BYTES);
+    assertThat(result.attachments().get(1).getContentId())
+        .as("its content id was in the record the cut went through")
+        .isEmpty();
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
+    assertThat(result.status().getWarningsList()).anyMatch(warning -> warning.contains("cut short"));
+  }
+
+  @Test
+  @DisplayName("bytes that only look like TNEF stay one opaque attachment")
+  void unreadableTnefStaysOpaque() throws Exception {
+    byte[] garbage = TnefFixtures.signatureThenGarbage();
+    Result result = parseWhole(EmlFixtures.withWinmailDat(garbage), "eml-tnef-garbage");
+    assertThat(result.attachments()).hasSize(1);
+    Attachment opaque = result.attachments().get(0);
+    assertThat(opaque.getFilename()).isEqualTo("winmail.dat");
+    assertThat(opaque.getContentType()).isEqualTo("application/ms-tnef");
+    assertThat(opaque.getSizeBytes()).isEqualTo(garbage.length);
+    assertThat(result.status().getWarningsList())
+        .anyMatch(warning -> warning.contains("could not be unpacked"));
+  }
+
+  @Test
+  @DisplayName("a container of ten thousand empty slots costs two warnings, not an event each")
+  void tnefSlotFloodIsBounded() throws Exception {
+    byte[] message = EmlFixtures.withWinmailDat(TnefFixtures.emptySlots(10_001));
+    Result result = parseWhole(message, "eml-tnef-slots");
+    assertThat(result.attachments()).isEmpty();
+    assertThat(result.status().getWarningsList())
+        .anyMatch(warning -> warning.contains("more than 10000 attachment slots"))
+        .anyMatch(warning -> warning.contains("10000 attachment slot(s) with neither a name nor data"))
+        .hasSizeLessThan(5);
+  }
+
+  @Test
+  @DisplayName("a flood of unreadable TNEF records costs one warning, and the attachment survives")
+  void unreadableTnefRecordsAreCountedOnce() throws Exception {
+    byte[] message = EmlFixtures.withWinmailDat(TnefFixtures.unreadableRecords(20_000));
+    Result result = parseWhole(message, "eml-tnef-unreadable");
+    assertThat(result.attachments())
+        .extracting(Attachment::getFilename)
+        .containsExactly(TnefFixtures.SEAL_NAME);
+    assertThat(result.status().getWarningsList())
+        .filteredOn(warning -> warning.contains("could not be read"))
+        .singleElement()
+        .asString()
+        .contains("20000 MAPI property record(s)");
+  }
+
+  @Test
+  @DisplayName("the trailer lists the first warnings and counts the rest")
+  void warningsAreCappedOnTheTrailer() throws Exception {
+    int nameless = EmailParseServiceImpl.MAX_WARNINGS + 50;
+    byte[] message = EmlFixtures.withWinmailDat(TnefFixtures.namelessAttachments(nameless));
+    Result result = parseWhole(message, "eml-tnef-nameless");
+    assertThat(result.status().getAttachments())
+        .as("every attachment is still counted")
+        .isEqualTo(nameless);
+    List<String> warnings = result.status().getWarningsList();
+    assertThat(warnings).hasSize(EmailParseServiceImpl.MAX_WARNINGS + 1);
+    assertThat(warnings.getLast())
+        .isEqualTo("50 further warning(s) suppressed; only the first "
+            + EmailParseServiceImpl.MAX_WARNINGS + " are listed");
+  }
+
+  @Test
+  @DisplayName("a winmail.dat attached to a .msg is unpacked the same way")
+  void winmailDatInsideAMsgIsUnpacked() throws Exception {
+    Result result = parseWhole(
+        MsgFixtures.withTnefAttachment(TnefFixtures.winmailDat(true)), "msg-tnef");
+    assertThat(result.bodies())
+        .as("the .msg has its own body")
+        .extracting(BodyPart::getText)
+        .containsExactly(MsgFixtures.PLAIN_BODY);
+    assertThat(result.attachments())
+        .extracting(Attachment::getPartId, Attachment::getIndex, Attachment::getFilename)
+        .containsExactly(
+            org.assertj.core.groups.Tuple.tuple(
+                "attach:0/attach:0", 0, TnefFixtures.ORDER_LONG_NAME),
+            org.assertj.core.groups.Tuple.tuple(
+                "attach:0/attach:1", 1, TnefFixtures.SEAL_NAME));
   }
 
   // --- .msg ---------------------------------------------------------------
@@ -600,6 +945,19 @@ class EmailParseServiceTest {
     assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
     assertThat(result.status().getWarningsList())
         .anyMatch(warning -> warning.contains("RTF-only"));
+  }
+
+  @Test
+  @DisplayName("a malformed RTF number costs nothing but the number")
+  void malformedRtfParameterKeepsTheMessage() throws Exception {
+    // An overlong control-word parameter used to throw NumberFormatException
+    // out of the RTF reader and turn the whole .msg into INTERNAL.
+    String rtf = "{\\rtf1\\ansi\\fs99999999999 Hearing set for the 14th.\\par}";
+    Result result = parseWhole(MsgFixtures.rtfOnly(rtf), "msg-rtf-overflow");
+    assertThat(result.info().getSubject()).isEqualTo("Rich text only");
+    assertThat(result.bodies()).hasSize(1);
+    assertThat(result.bodies().get(0).getText()).isEqualTo("Hearing set for the 14th.");
+    assertThat(result.status().getWarningsList()).anyMatch(warning -> warning.contains("RTF-only"));
   }
 
   @Test

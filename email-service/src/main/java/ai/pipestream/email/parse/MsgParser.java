@@ -7,7 +7,6 @@ import ai.pipestream.email.v1.BodyMediaType;
 import ai.pipestream.email.v1.BodyPart;
 import ai.pipestream.email.v1.EmailFormat;
 import ai.pipestream.email.v1.EmailInfo;
-import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
 import jakarta.mail.internet.InternetHeaders;
 import java.io.ByteArrayInputStream;
@@ -17,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Calendar;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.poi.hsmf.MAPIMessage;
 import org.apache.poi.hsmf.datatypes.AttachmentChunks;
 import org.apache.poi.hsmf.datatypes.ByteChunk;
@@ -92,8 +92,9 @@ public final class MsgParser {
             + unguessable.getMessage());
       }
       sink.info(envelope(message, options.documentId(), sink));
-      bodies(message, sink);
-      attachments(message, options, sink);
+      sink.checkpoint();
+      boolean hasBody = bodies(message, sink);
+      attachments(message, options, sink, hasBody);
     } catch (IOException closeFailed) {
       throw new InvalidEmailException(
           "unreadable Outlook message: " + closeFailed.getMessage(), closeFailed);
@@ -249,7 +250,8 @@ public final class MsgParser {
     return values == null ? new String[0] : values;
   }
 
-  private static void bodies(MAPIMessage message, ParseSink sink) {
+  /** Emits the bodies; true when at least one went out. */
+  private static boolean bodies(MAPIMessage message, ParseSink sink) {
     String plain = body(message::getTextBody);
     String html = body(message::getHtmlBody);
     if (!plain.isEmpty()) {
@@ -273,40 +275,68 @@ public final class MsgParser {
               .build());
     }
     if (!plain.isEmpty() || !html.isEmpty()) {
-      return;
+      return true;
     }
     // HTML wins over RTF; RTF is the last resort, and v1 says so out loud
     // rather than pretending the layout survived.
     String rtf = body(message::getRtfBody);
     if (rtf.isEmpty()) {
       sink.warn("message carries no plain, HTML, or RTF body");
-      return;
+      return false;
     }
-    String extracted = RtfPlainText.extract(rtf);
+    String extracted;
+    try {
+      extracted = RtfPlainText.extract(rtf);
+    } catch (RuntimeException malformed) {
+      // A damaged RTF body costs the body, not the envelope and the
+      // attachments around it.
+      sink.warn("RTF-only body could not be converted to text: " + malformed);
+      return false;
+    }
     sink.warn("RTF-only body: plain text extracted without layout, tables, or formatting");
-    if (!extracted.isEmpty()) {
-      sink.bodyPart(
-          BodyPart.newBuilder()
-              .setPartId("body:rtf")
-              .setMediaType(BodyMediaType.BODY_MEDIA_TYPE_PLAIN)
-              .setContentTypeRaw("text/plain")
-              .setText(extracted)
-              .setSourceProperty("PidTagRtfCompressed")
-              .build());
+    if (extracted.isEmpty()) {
+      return false;
     }
+    sink.bodyPart(
+        BodyPart.newBuilder()
+            .setPartId("body:rtf")
+            .setMediaType(BodyMediaType.BODY_MEDIA_TYPE_PLAIN)
+            .setContentTypeRaw("text/plain")
+            .setText(extracted)
+            .setSourceProperty("PidTagRtfCompressed")
+            .build());
+    return true;
   }
 
-  private static void attachments(MAPIMessage message, ParseOptions options, ParseSink sink) {
+  /**
+   * Emits the attachments in storage order. {@code Attachment.index} counts
+   * in message order, which matches the storage index unless a TNEF
+   * container among them unpacks into several.
+   */
+  private static void attachments(
+      MAPIMessage message, ParseOptions options, ParseSink sink, boolean hasBody) {
     AttachmentChunks[] found = message.getAttachmentFiles();
     if (found == null) {
       return;
     }
+    AtomicInteger next = new AtomicInteger();
     for (int index = 0; index < found.length; index++) {
+      sink.checkpoint();
       AttachmentChunks chunk = found[index];
       String filename = firstNonEmpty(
           text(chunk.getAttachLongFileName()), text(chunk.getAttachFileName()));
       String contentId = HeaderProjection.stripAngles(text(chunk.getAttachContentId()));
       byte[] payload = payload(chunk, index, sink);
+      if (TnefContainer.isTnef(payload)) {
+        TnefContainer.Unpacked unpacked = TnefContainer.unpack(
+            payload, "attach:" + index, !hasBody, options, sink, next::getAndIncrement);
+        if (unpacked.readable()) {
+          hasBody |= unpacked.emittedBody();
+          continue;
+        }
+        sink.warn("attachment " + index + " is a TNEF (winmail.dat) container that could not"
+            + " be unpacked; emitted as an opaque attachment");
+      }
       String contentType = text(chunk.getAttachMimeTag());
       if (chunk.getAttachmentDirectory() != null) {
         contentType = firstNonEmpty(contentType, EMBEDDED_MESSAGE_MIMETYPE);
@@ -318,21 +348,14 @@ public final class MsgParser {
         sink.warn("attachment " + index + " has no filename");
       }
       Attachment.Builder attachment = Attachment.newBuilder()
-          .setIndex(index)
+          .setIndex(next.getAndIncrement())
           .setPartId("attach:" + index)
           .setFilename(filename)
           .setContentType(HeaderProjection.baseType(contentType))
           .setSizeBytes(payload.length)
           .setContentId(contentId)
           .setInline(!contentId.isEmpty());
-      if (options.includeAttachmentBytes()) {
-        if (payload.length <= options.maxAttachmentBytes()) {
-          attachment.setData(ByteString.copyFrom(payload));
-        } else {
-          sink.warn("attachment " + index + " (" + payload.length
-              + " bytes) exceeds the per-attachment cap; described without its bytes");
-        }
-      }
+      options.attachPayload(attachment, payload, sink);
       sink.attachment(attachment.build());
     }
   }
