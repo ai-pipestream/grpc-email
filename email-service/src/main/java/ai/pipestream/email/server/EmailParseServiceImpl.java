@@ -793,8 +793,10 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
         // The trailer and the document are for a client that is still there.
         sink.checkpoint();
         sink.trailer(bytes);
-        responses.onCompleted();
+        // Counted before the caller learns the call ended, so anyone who
+        // sees the end also sees the count.
         metrics.messageParsed();
+        responses.onCompleted();
       } catch (ParseCancelledException gone) {
         // The client went away mid-parse; there is nobody left to answer.
       } catch (Throwable failure) {
