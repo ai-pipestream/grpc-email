@@ -13,6 +13,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -85,5 +86,44 @@ class ServiceMetricsTest {
     assertThat(service.metrics().render()).isEqualTo(
         "grpc-email metrics: messages{parsed=1,rejected=1,failed=0}"
             + " content{body_parts=1,attachments=0,bytes=" + (eml.length + garbage.length) + "}");
+  }
+
+  @Test
+  void aParseIsCountedBeforeTheCallerLearnsItEnded() throws Exception {
+    EmailParseServiceImpl service =
+        new EmailParseServiceImpl(4L * 1024 * 1024, 64 * 1024, 4, executor);
+    byte[] eml = EmlFixtures.plainText();
+    AtomicReference<String> atCompletion = new AtomicReference<>();
+    CountDownLatch done = new CountDownLatch(1);
+    StreamObserver<ParseEmailRequest> requests =
+        service.parseEmail(new StreamObserver<>() {
+          @Override
+          public void onNext(ParseEmailResponse event) {}
+
+          @Override
+          public void onError(Throwable error) {
+            done.countDown();
+          }
+
+          @Override
+          public void onCompleted() {
+            atCompletion.set(service.metrics().render());
+            done.countDown();
+          }
+        });
+    requests.onNext(ParseEmailRequest.newBuilder()
+        .setOptions(ParseEmailOptions.newBuilder().setDocumentId("metrics"))
+        .build());
+    requests.onNext(ParseEmailRequest.newBuilder()
+        .setChunk(EmailChunk.newBuilder()
+            .setData(ByteString.copyFrom(eml))
+            .setComplete(true))
+        .build());
+    requests.onCompleted();
+    assertThat(done.await(30, TimeUnit.SECONDS)).as("call finished").isTrue();
+
+    // A reader that sees the call end, as this observer does, sees it counted.
+    assertThat(atCompletion.get()).startsWith(
+        "grpc-email metrics: messages{parsed=1,rejected=0,failed=0}");
   }
 }
