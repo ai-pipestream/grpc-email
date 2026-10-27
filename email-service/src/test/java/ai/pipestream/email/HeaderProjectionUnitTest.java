@@ -11,6 +11,7 @@ import ai.pipestream.email.v1.AddressRole;
 import ai.pipestream.email.v1.EmailFormat;
 import ai.pipestream.email.v1.EmailInfo;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import org.junit.jupiter.api.DisplayName;
@@ -333,5 +334,50 @@ class HeaderProjectionUnitTest {
   void unreadableHeaderBlockIsInvalidEmail() {
     assertThatExceptionOfType(InvalidEmailException.class)
         .isThrownBy(() -> HeaderProjection.read(null, 0));
+  }
+
+  /**
+   * A header that is nothing but line folds. Jakarta Mail's unfold copies
+   * the rest of the value on every fold it removes, so a value of a few
+   * hundred thousand folds takes a minute of CPU on the request thread while
+   * the call holds its parse slot. One megabyte of this must project in
+   * seconds, not minutes.
+   */
+  @Test
+  @DisplayName("a subject of a quarter million folded lines projects in linear time")
+  void aFloodOfFoldedLinesIsUnfoldedInLinearTime() {
+    String block =
+        "From: a@example.com\r\nSubject: " + "a\r\n ".repeat(249_999) + "a\r\n\r\n";
+    long started = System.nanoTime();
+    EmailInfo info = project(block);
+    Duration took = Duration.ofNanos(System.nanoTime() - started);
+    assertThat(info.getSubject()).startsWith("a a a").hasSize(2 * 250_000 - 1);
+    assertThat(took)
+        .as("unfolding must not rescan the value once per fold")
+        .isLessThan(Duration.ofSeconds(10));
+  }
+
+  /**
+   * An address header that opens a comment, an angle address, or a domain
+   * literal and never closes it. Jakarta Mail's lenient parser restarts its
+   * scan after every such opener, so a 200 KB value of them takes over a
+   * minute while the call holds its parse slot.
+   */
+  @Test
+  @DisplayName("a flood of unterminated delimiters in an address header parses in linear time")
+  void aFloodOfUnterminatedDelimitersIsParsedInLinearTime() {
+    for (String opener : List.of("(", "<", "[")) {
+      String value = "Ada <ada@example.com>, " + opener.repeat(200_000);
+      long started = System.nanoTime();
+      List<Address> parsed = HeaderProjection.parseAddressList(value, AddressRole.ADDRESS_ROLE_TO);
+      Duration took = Duration.ofNanos(System.nanoTime() - started);
+      assertThat(parsed)
+          .as("the mailbox before the unterminated '" + opener + "' still parses")
+          .extracting(Address::getAddress)
+          .startsWith("ada@example.com");
+      assertThat(took)
+          .as("an unterminated '" + opener + "' must not restart the scan")
+          .isLessThan(Duration.ofSeconds(10));
+    }
   }
 }
