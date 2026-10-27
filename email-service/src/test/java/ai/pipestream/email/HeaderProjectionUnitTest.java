@@ -357,6 +357,27 @@ class HeaderProjectionUnitTest {
         .isLessThan(Duration.ofSeconds(10));
   }
 
+  @Test
+  @DisplayName("an unclosed delimiter keeps its mailbox verbatim and the ones before it parsed")
+  void anUnclosedDelimiterKeepsTheRestOfTheValueAsOneMailbox() {
+    assertThat(HeaderProjection.parseAddressList(
+        "Ada <ada@example.com>, (clerk", AddressRole.ADDRESS_ROLE_TO))
+        .as("the text after the opener is kept as written, not quietly dropped")
+        .extracting(Address::getName, Address::getAddress)
+        .containsExactly(tuple("Ada", "ada@example.com"), tuple("", "(clerk"));
+    assertThat(HeaderProjection.parseAddressList(
+        "a@example.com [x, b@example.com", AddressRole.ADDRESS_ROLE_TO))
+        .as("without a closer there is no telling where the mailbox ends")
+        .extracting(Address::getAddress)
+        .containsExactly("a@example.com [x, b@example.com");
+    assertThat(HeaderProjection.parseAddressList(
+        "\"Ruiz, Ana\" <ana@example.com>, bob@example.com (x (y) z)",
+        AddressRole.ADDRESS_ROLE_TO))
+        .as("delimiters that do close, nested or quoted, are not unclosed")
+        .extracting(Address::getAddress)
+        .containsExactly("ana@example.com", "bob@example.com");
+  }
+
   /**
    * An address header that opens a comment, an angle address, or a domain
    * literal and never closes it. Jakarta Mail's lenient parser restarts its
