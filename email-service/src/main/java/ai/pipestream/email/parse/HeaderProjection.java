@@ -125,7 +125,7 @@ public final class HeaderProjection {
       if (raw == null || raw.isBlank()) {
         continue;
       }
-      String unfolded = MimeUtility.unfold(raw);
+      String unfolded = HeaderFolding.unfold(raw);
       int cursor = 0;
       boolean bracketed = false;
       while (true) {
@@ -182,7 +182,7 @@ public final class HeaderProjection {
     if (value == null || value.isEmpty()) {
       return "";
     }
-    String unfolded = MimeUtility.unfold(value);
+    String unfolded = HeaderFolding.unfold(value);
     if (!unfolded.contains("=?")) {
       return unfolded;
     }
@@ -263,15 +263,37 @@ public final class HeaderProjection {
    * Parses one address-list header. Non-strict parsing keeps malformed
    * mailboxes rather than dropping the whole header; a mailbox that yields
    * neither a name nor an address is discarded.
+   *
+   * <p>A comment, angle address, domain literal or quoted string that is
+   * opened and never closed ends the readable part of the value: the
+   * mailbox it sits in, through the end of the value, is kept verbatim as
+   * one address rather than handed to Jakarta Mail, which would restart its
+   * scan after every such opener and take quadratic time on a flood of them.
    */
   public static List<Address> parseAddressList(String value, AddressRole role) {
     List<Address> parsed = new ArrayList<>();
     if (value == null || value.isBlank()) {
       return parsed;
     }
+    String list = ungroup(HeaderFolding.unfold(value));
+    int unterminated = MailboxDelimiters.unterminatedMailboxStart(list);
+    String readable = unterminated < 0 ? list : list.substring(0, unterminated);
+    parsed.addAll(parseMailboxes(readable, role));
+    if (unterminated >= 0) {
+      parsed.add(address(role, "", list.substring(unterminated)));
+    }
+    return parsed;
+  }
+
+  /** Jakarta Mail's lenient parse of a value every delimiter of which closes. */
+  private static List<Address> parseMailboxes(String list, AddressRole role) {
+    List<Address> parsed = new ArrayList<>();
+    if (list.isBlank()) {
+      return parsed;
+    }
     InternetAddress[] mailboxes;
     try {
-      mailboxes = InternetAddress.parseHeader(ungroup(MimeUtility.unfold(value)), false);
+      mailboxes = InternetAddress.parseHeader(list, false);
     } catch (AddressException malformed) {
       return parsed;
     }
@@ -400,7 +422,7 @@ public final class HeaderProjection {
       return null;
     }
     try {
-      Date parsed = new MailDateFormat().parse(MimeUtility.unfold(value).trim());
+      Date parsed = new MailDateFormat().parse(HeaderFolding.unfold(value).trim());
       return parsed == null ? null : timestamp(parsed.getTime());
     } catch (ParseException | RuntimeException unparseable) {
       return null;
@@ -416,7 +438,7 @@ public final class HeaderProjection {
     if (values == null || values.length == 0 || values[0] == null) {
       return null;
     }
-    String value = MimeUtility.unfold(values[0]);
+    String value = HeaderFolding.unfold(values[0]);
     int semicolon = value.lastIndexOf(';');
     if (semicolon < 0 || semicolon + 1 >= value.length()) {
       return null;

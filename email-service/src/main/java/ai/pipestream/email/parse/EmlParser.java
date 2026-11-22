@@ -464,7 +464,7 @@ public final class EmlParser {
    * @return the unquoted value, or empty when the parameter is absent
    */
   private static String lenientParameter(String header, String name) {
-    String unfolded = MimeUtility.unfold(header);
+    String unfolded = HeaderFolding.unfold(header);
     int start = 0;
     boolean first = true;
     while (start <= unfolded.length()) {
