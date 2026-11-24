@@ -62,7 +62,9 @@ Events, in order:
 1. `EmailInfo`: detected format (`EML`/`MSG`), subject, addresses,
    dates, message-id, content-type of the root.
 2. `BodyPart`: `text/plain` and/or `text/html`, charset already decoded
-   to UTF-8. HTML is opaque payload for the HTML collector.
+   to UTF-8 (`charset_detected`, `charset_fallback` and
+   `undecodable_sequences` say when the declared charset did not fit the
+   bytes). HTML is opaque payload for the HTML collector.
 3. `Attachment`: filename, content type, size, content-id, optional
    bytes.
 4. `Document`: only when `emit_document`; see §4.

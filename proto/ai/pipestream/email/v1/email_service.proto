@@ -283,6 +283,25 @@ message BodyPart {
   // either format, the MAPI property this body came from ("PidTagBody",
   // "PidTagHtml", "PidTagRtfCompressed"). Empty for any other .eml part.
   string source_property = 6;
+  // Charset the bytes of an .eml part were actually decoded with, as a
+  // lowercased charset name ("utf-8", "windows-1252", "us-ascii"). The part's
+  // transfer-decoded bytes are decoded strictly: when they are not valid in
+  // the declared charset, or the part declared none and is not plain
+  // US-ASCII, the service picks UTF-8 when the bytes are valid UTF-8, then
+  // windows-1252, then ISO-8859-1 (which maps every byte). Empty for a .msg
+  // or TNEF body, which does not arrive as charset-declared bytes.
+  string charset_detected = 7;
+  // True when charset_detected is not the charset the part declared: the
+  // declared one was wrong for the bytes, unknown to this service, or
+  // missing while the bytes were not US-ASCII. ParseStatus carries a warning
+  // naming the part.
+  bool charset_fallback = 8;
+  // Byte sequences that were not valid in charset_detected and were each
+  // replaced by U+FFFD in text: a body that is mostly valid in its charset
+  // with a few damaged bytes keeps that charset rather than being re-read as
+  // another. 0 for a clean decode. ParseStatus carries a warning when it is
+  // not 0.
+  uint32 undecodable_sequences = 9;
 }
 
 // One attachment the message carries. Emitted unless omit_attachment_list
