@@ -477,6 +477,22 @@ class EmailParseServiceTest {
         .anyMatch(warning -> warning.contains("no charset"));
   }
 
+  @Test
+  @DisplayName("a Date header that will not parse makes the parse PARTIAL and is named on EmailInfo")
+  void unparseableDateIsPartialAndNamed() throws Exception {
+    byte[] message = ("From: cron@example.com\r\nTo: ops@example.com\r\n"
+        + "Date: 2023-11-14T22:13:20Z\r\nSubject: nightly\r\n\r\nbody\r\n")
+        .getBytes(StandardCharsets.US_ASCII);
+
+    Result result = parseWhole(message, "eml-bad-date");
+    EmailInfo info = result.info();
+    assertThat(info.hasDate()).isFalse();
+    assertThat(info.getUnparsedHeadersList()).containsExactly("Date");
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
+    assertThat(result.status().getWarningsList())
+        .anyMatch(warning -> warning.contains("Date") && warning.contains("could not be parsed"));
+  }
+
   // --- damaged transfer encodings: one bad part never fails the message ----
 
   @Test

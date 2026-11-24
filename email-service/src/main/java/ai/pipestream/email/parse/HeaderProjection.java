@@ -19,6 +19,7 @@ import java.util.Enumeration;
 import java.util.List;
 import java.util.Locale;
 import java.util.StringTokenizer;
+import java.util.function.Consumer;
 
 /**
  * Turns an RFC 822 header block into the typed EmailInfo event. Everything
@@ -41,27 +42,48 @@ public final class HeaderProjection {
     }
   }
 
-  /** Projects a parsed header block into the first event of the stream. */
-  public static EmailInfo project(InternetHeaders headers, String documentId, EmailFormat format) {
+  /**
+   * Projects a parsed header block into the first event of the stream.
+   *
+   * <p>A header that is present and cannot be read is not the same fact as a
+   * header that is absent, and the typed fields alone cannot tell the two
+   * apart: both leave {@code date} unset. So every such header is named in
+   * {@code EmailInfo.unparsed_headers} and described to {@code warn}, which
+   * the service wires to the trailer's warnings. There is deliberately no
+   * overload without it.
+   *
+   * @param warn receives one sentence per header that could not be read
+   */
+  public static EmailInfo project(
+      InternetHeaders headers, String documentId, EmailFormat format, Consumer<String> warn) {
     EmailInfo.Builder info = EmailInfo.newBuilder()
         .setDocumentId(documentId)
         .setFormat(format)
         .setSubject(decoded(first(headers, "Subject")));
+    Unparsed unparsed = new Unparsed(info, warn);
 
-    addAddresses(info, headers, "From", AddressRole.ADDRESS_ROLE_FROM);
-    addAddresses(info, headers, "Sender", AddressRole.ADDRESS_ROLE_SENDER);
-    addAddresses(info, headers, "Reply-To", AddressRole.ADDRESS_ROLE_REPLY_TO);
-    addAddresses(info, headers, "To", AddressRole.ADDRESS_ROLE_TO);
-    addAddresses(info, headers, "Cc", AddressRole.ADDRESS_ROLE_CC);
-    addAddresses(info, headers, "Bcc", AddressRole.ADDRESS_ROLE_BCC);
+    addAddresses(info, headers, "From", AddressRole.ADDRESS_ROLE_FROM, unparsed);
+    addAddresses(info, headers, "Sender", AddressRole.ADDRESS_ROLE_SENDER, unparsed);
+    addAddresses(info, headers, "Reply-To", AddressRole.ADDRESS_ROLE_REPLY_TO, unparsed);
+    addAddresses(info, headers, "To", AddressRole.ADDRESS_ROLE_TO, unparsed);
+    addAddresses(info, headers, "Cc", AddressRole.ADDRESS_ROLE_CC, unparsed);
+    addAddresses(info, headers, "Bcc", AddressRole.ADDRESS_ROLE_BCC, unparsed);
 
-    Timestamp date = parseDate(first(headers, "Date"));
+    String dateValue = first(headers, "Date");
+    Timestamp date = parseDate(dateValue);
     if (date != null) {
       info.setDate(date);
+    } else if (!dateValue.isBlank()) {
+      unparsed.header("Date", "Date header could not be parsed as an RFC 5322 date and the"
+          + " typed date is unset: " + quoted(dateValue));
     }
-    Timestamp received = receivedDate(headers);
+    String receivedClause = receivedDateClause(headers);
+    Timestamp received = parseDate(receivedClause);
     if (received != null) {
       info.setReceivedDate(received);
+    } else if (!receivedClause.isBlank()) {
+      unparsed.header("Received", "Received header's date clause could not be parsed and the"
+          + " typed received date is unset: " + quoted(receivedClause));
     }
 
     info.setMessageId(stripAngles(first(headers, "Message-ID")));
@@ -246,17 +268,58 @@ public final class HeaderProjection {
     return decodedAny;
   }
 
+  /**
+   * Collects what the projection could not read: the header's name on the
+   * envelope, once, and a sentence for the trailer.
+   */
+  private record Unparsed(EmailInfo.Builder info, Consumer<String> warn) {
+
+    void header(String field, String warning) {
+      if (!info.getUnparsedHeadersList().contains(field)) {
+        info.addUnparsedHeaders(field);
+      }
+      warn.accept(warning);
+    }
+  }
+
+  /** A header value as it is quoted in a warning: unfolded, trimmed, bounded. */
+  private static String quoted(String value) {
+    String text = HeaderFolding.unfold(value).trim();
+    return '"' + (text.length() <= 120 ? text : text.substring(0, 120) + "...") + '"';
+  }
+
   private static void addAddresses(
-      EmailInfo.Builder info, InternetHeaders headers, String field, AddressRole role) {
+      EmailInfo.Builder info, InternetHeaders headers, String field, AddressRole role,
+      Unparsed unparsed) {
     String[] values = headers.getHeader(field);
     if (values == null) {
       return;
     }
     for (String value : values) {
-      for (Address parsed : parseAddressList(value, role)) {
-        info.addAddresses(parsed);
+      AddressList list = readAddressList(value, role);
+      info.addAllAddresses(list.addresses());
+      if (list.verbatim() > 0) {
+        unparsed.header(field, field + " header: " + list.verbatim() + " part"
+            + (list.verbatim() == 1 ? "" : "s") + " of the address list could not be read as"
+            + " mailboxes and " + (list.verbatim() == 1 ? "is" : "are") + " kept verbatim in"
+            + " Address.address (" + list.cause() + ")");
       }
     }
+  }
+
+  /**
+   * One address-list header value, read.
+   *
+   * @param addresses the mailboxes, in order, including the ones kept verbatim
+   * @param verbatim how many of them are text that could not be read as a
+   *     mailbox and were kept as written
+   * @param cause why, for the first of those; empty when there are none
+   */
+  public record AddressList(List<Address> addresses, int verbatim, String cause) {}
+
+  /** The addresses of {@link #readAddressList}, for a caller with no use for the rest. */
+  public static List<Address> parseAddressList(String value, AddressRole role) {
+    return readAddressList(value, role).addresses();
   }
 
   /**
@@ -270,33 +333,45 @@ public final class HeaderProjection {
    * one address rather than handed to Jakarta Mail, which would restart its
    * scan after every such opener and take quadratic time on a flood of them.
    */
-  public static List<Address> parseAddressList(String value, AddressRole role) {
+  public static AddressList readAddressList(String value, AddressRole role) {
     List<Address> parsed = new ArrayList<>();
     if (value == null || value.isBlank()) {
-      return parsed;
+      return new AddressList(parsed, 0, "");
     }
     String list = ungroup(HeaderFolding.unfold(value));
     int unterminated = MailboxDelimiters.unterminatedMailboxStart(list);
     String readable = unterminated < 0 ? list : list.substring(0, unterminated);
-    parsed.addAll(parseMailboxes(readable, role));
+    int verbatim = 0;
+    String cause = "";
+    try {
+      parsed.addAll(parseMailboxes(readable, role));
+    } catch (AddressException rejected) {
+      // Jakarta Mail's header parse is lenient enough that nothing is known
+      // to land here, but if a release starts rejecting a list, the text is
+      // kept and counted rather than turned into "no recipients".
+      parsed.add(address(role, "", readable));
+      verbatim++;
+      cause = "the address parser rejected it: " + rejected.getMessage();
+    }
     if (unterminated >= 0) {
       parsed.add(address(role, "", list.substring(unterminated)));
+      verbatim++;
+      if (cause.isEmpty()) {
+        cause = "a comment, angle address, domain literal or quoted string in it is never"
+            + " closed";
+      }
     }
-    return parsed;
+    return new AddressList(parsed, verbatim, cause);
   }
 
   /** Jakarta Mail's lenient parse of a value every delimiter of which closes. */
-  private static List<Address> parseMailboxes(String list, AddressRole role) {
+  private static List<Address> parseMailboxes(String list, AddressRole role)
+      throws AddressException {
     List<Address> parsed = new ArrayList<>();
     if (list.isBlank()) {
       return parsed;
     }
-    InternetAddress[] mailboxes;
-    try {
-      mailboxes = InternetAddress.parseHeader(list, false);
-    } catch (AddressException malformed) {
-      return parsed;
-    }
+    InternetAddress[] mailboxes = InternetAddress.parseHeader(list, false);
     for (InternetAddress mailbox : mailboxes) {
       String name = decoded(mailbox.getPersonal());
       String spec = mailbox.getAddress() == null ? "" : mailbox.getAddress().trim();
@@ -430,20 +505,21 @@ public final class HeaderProjection {
   }
 
   /**
-   * Delivery time from the topmost Received header, whose trailing
-   * "; &lt;date&gt;" clause is the time the last hop stamped.
+   * The delivery-time text of the topmost Received header: its trailing
+   * "; &lt;date&gt;" clause is the time the last hop stamped. Empty when the
+   * message has no Received header or the header has no such clause.
    */
-  private static Timestamp receivedDate(InternetHeaders headers) {
+  private static String receivedDateClause(InternetHeaders headers) {
     String[] values = headers.getHeader("Received");
     if (values == null || values.length == 0 || values[0] == null) {
-      return null;
+      return "";
     }
     String value = HeaderFolding.unfold(values[0]);
     int semicolon = value.lastIndexOf(';');
     if (semicolon < 0 || semicolon + 1 >= value.length()) {
-      return null;
+      return "";
     }
-    return parseDate(value.substring(semicolon + 1));
+    return value.substring(semicolon + 1);
   }
 
   /** Lowercases a content type to its "type/subtype", dropping parameters. */
