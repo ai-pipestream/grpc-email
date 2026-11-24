@@ -34,6 +34,8 @@ final class TnefFixtures {
   private static final int PID_ATTACH_LONG_FILENAME = 0x3707;
   private static final int PID_ATTACH_MIME_TAG = 0x370E;
   private static final int PID_ATTACH_CONTENT_ID = 0x3712;
+  private static final int PID_INTERNET_CPID = 0x3FDE;
+  private static final int TYPE_LONG = 0x0003;
   private static final int TYPE_STRING8 = 0x001E;
   private static final int TYPE_UNICODE = 0x001F;
   private static final int TYPE_BINARY = 0x0102;
@@ -141,6 +143,32 @@ final class TnefFixtures {
         .build();
   }
 
+  /**
+   * A container whose only body is HTML stored as {@code html} bytes, with
+   * PidTagInternetCodepage set to {@code codePage} (0 to store none).
+   */
+  static byte[] htmlBytes(byte[] html, int codePage) {
+    Properties properties = new Properties();
+    if (codePage != 0) {
+      properties.int32(PID_INTERNET_CPID, codePage);
+    }
+    return new Stream()
+        .message(ATT_OEM_CODEPAGE, ATP_LONG, codePage(1252))
+        .message(ATT_MAPI_PROPS, ATP_BYTE, properties.binary(PID_BODY_HTML, html).build())
+        .build();
+  }
+
+  /**
+   * A container whose only body is attBody, 8-bit text stored as
+   * {@code body} bytes in the stream's code page, {@code oemCodePage}.
+   */
+  static byte[] attBodyBytes(byte[] body, int oemCodePage) {
+    return new Stream()
+        .message(ATT_OEM_CODEPAGE, ATP_LONG, codePage(oemCodePage))
+        .message(ATT_BODY, ATP_TEXT, body)
+        .build();
+  }
+
   /** A container whose only body is {@code rtf}, stored uncompressed. */
   static byte[] rtfBody(String rtf) {
     return new Stream()
@@ -227,6 +255,15 @@ final class TnefFixtures {
 
     private Properties binary(int id, byte[] value) {
       return variable(TYPE_BINARY, id, value);
+    }
+
+    /** A fixed-length PT_LONG property: type, id, four bytes of value. */
+    private Properties int32(int id, int value) {
+      out.writeBytes(uint16(TYPE_LONG));
+      out.writeBytes(uint16(id));
+      out.writeBytes(uint32(value));
+      count++;
+      return this;
     }
 
     /** Type, id, one value: its length, its bytes, padding to four bytes. */

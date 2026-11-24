@@ -234,7 +234,8 @@ public final class MsgParser {
   private static boolean bodies(MAPIMessage message, ParseSink sink) {
     AtomicBoolean unreadable = new AtomicBoolean();
     String plain = body("PidTagBody", message::getTextBody, sink, unreadable);
-    String html = body("PidTagHtml", message::getHtmlBody, sink, unreadable);
+    BodyPart.Builder htmlBody = BodyPart.newBuilder();
+    String html = html(message, htmlBody, sink, unreadable);
     if (!plain.isEmpty()) {
       sink.bodyPart(
           BodyPart.newBuilder()
@@ -247,7 +248,7 @@ public final class MsgParser {
     }
     if (!html.isEmpty()) {
       sink.bodyPart(
-          BodyPart.newBuilder()
+          htmlBody
               .setPartId("body:html")
               .setMediaType(BodyMediaType.BODY_MEDIA_TYPE_HTML)
               .setContentTypeRaw("text/html")
@@ -291,6 +292,47 @@ public final class MsgParser {
     RtfPlainText.describe(extracted, body, "RTF body", sink);
     sink.bodyPart(body.build());
     return true;
+  }
+
+  /**
+   * The HTML body's text, with what its decoding took written onto
+   * {@code body}.
+   *
+   * <p>Outlook stores PidTagHtml as bytes in the code page PidTagInternetCodepage
+   * names. POI's getter decodes those through a replacing decoder, and when
+   * the code page is missing or one Java does not know it reads them as
+   * windows-1252 and writes a log line: a UTF-8 body with no stored code
+   * page came out as mojibake with STATE_OK. The bytes are decoded here
+   * instead, by the same strict rule as an .eml body, so a body that did
+   * not fit its code page is flagged on the BodyPart and warned about. An
+   * HTML body stored as a string property is already text and is taken as
+   * POI reads it.
+   */
+  private static String html(
+      MAPIMessage message, BodyPart.Builder body, ParseSink sink, AtomicBoolean unreadable) {
+    Chunks chunks = message.getMainChunks();
+    ByteChunk binary = chunks.getHtmlBodyChunkBinary();
+    if (binary == null || binary.getValue() == null) {
+      return body("PidTagHtml", message::getHtmlBody, sink, unreadable);
+    }
+    String declared = BodyText.codePageName(internetCodePage(chunks));
+    BodyText.Decoded decoded = BodyText.decode(binary.getValue(), declared, "body:html", sink);
+    body.setCharset(declared)
+        .setCharsetDetected(decoded.charsetDetected())
+        .setCharsetFallback(decoded.fallback())
+        .setUndecodableSequences(decoded.undecodableSequences());
+    return decoded.text();
+  }
+
+  /** PidTagInternetCodepage, or 0 when the message stored none. */
+  private static int internetCodePage(Chunks chunks) {
+    Map<MAPIProperty, List<PropertyValue>> properties = chunks.getProperties();
+    List<PropertyValue> values =
+        properties == null ? null : properties.get(MAPIProperty.INTERNET_CPID);
+    if (values == null || values.isEmpty()) {
+      return 0;
+    }
+    return values.getFirst().getValue() instanceof Number number ? number.intValue() : 0;
   }
 
   /**

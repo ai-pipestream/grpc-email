@@ -315,7 +315,10 @@ message BodyPart {
   // Part content transcoded to UTF-8. HTML is the source markup, untouched.
   string text = 4;
   // Charset the part declared, for example "iso-8859-1". Empty when the
-  // part declared none and US-ASCII was assumed.
+  // part declared none and US-ASCII was assumed. For a MAPI body stored as
+  // bytes (the HTML body of a .msg or a TNEF container, a TNEF attBody), the
+  // name of the code page the store recorded for it, "cpN" for a code page
+  // this service cannot decode, and empty when none was recorded.
   string charset = 5;
   // For .msg, and for a body taken from a TNEF (winmail.dat) container in
   // either format, the MAPI property this body came from ("PidTagBody",
@@ -330,7 +333,10 @@ message BodyPart {
   // from RTF (source_property "PidTagRtfCompressed"), the charset of the
   // RTF's code page, in which its \'hh bytes were decoded; charset is then
   // that same charset, or "cpN" for a code page this service cannot decode.
-  // Empty for any other .msg or TNEF body, which arrives as text.
+  // A MAPI body stored as bytes is decoded by the same strict rule as an
+  // .eml part, with its recorded code page as the declared charset. Empty
+  // for a .msg or TNEF body stored as a Unicode string, which arrives as
+  // text.
   string charset_detected = 7;
   // True when charset_detected is not the charset the part declared: the
   // declared one was wrong for the bytes, unknown to this service, or

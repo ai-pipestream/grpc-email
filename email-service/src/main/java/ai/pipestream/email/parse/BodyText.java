@@ -56,9 +56,24 @@ final class BodyText {
   record Decoded(String text, String charsetDetected, boolean fallback, int undecodableSequences) {}
 
   /**
+   * The name a Windows code page is declared under: the charset's own name
+   * when this JVM has one, "cp" and the number when it does not (which
+   * {@link #decode} then reports as a charset it cannot decode), and empty
+   * for no code page at all.
+   */
+  static String codePageName(int codePage) {
+    if (codePage <= 0) {
+      return "";
+    }
+    Charset charset = CodePages.charset(codePage);
+    return charset == null ? "cp" + codePage : CodePages.name(charset);
+  }
+
+  /**
    * Decodes {@code bytes}, the transfer-decoded content of the part at
    * {@code path}, whose Content-Type declared {@code declaredCharset} (empty
-   * for none).
+   * for none). A MAPI body stored as bytes goes through the same rule, with
+   * the name of its stored code page as the declared charset.
    */
   static Decoded decode(byte[] bytes, String declaredCharset, String path, ParseSink sink) {
     Charset declared = charset(declaredCharset);
