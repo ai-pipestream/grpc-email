@@ -207,7 +207,13 @@ an invented page number.
   force names with `\fcharset` or `\cpg`), double-byte code pages
   included; `BodyPart.charset_detected` names it, and a code page this
   service cannot decode keeps its bytes as ISO-8859-1 with
-  `charset_fallback` set and a warning. Transport headers are surfaced when the message kept
+  `charset_fallback` set and a warning. An HTML body stored as bytes is
+  decoded strictly in the code page `PidTagInternetCodepage` names, by the
+  same rule as an `.eml` body: when the bytes do not fit it, or no code page
+  is stored and they are not US-ASCII, the body is read as UTF-8 when valid
+  and otherwise windows-1252, flagged on the `BodyPart` and warned about
+  (the same holds for an HTML body or an `attBody` inside a TNEF
+  container). Transport headers are surfaced when the message kept
   them; MAPI properties are never dressed up as headers they are not.
   Outlook stores an embedded message as a nested storage directory rather
   than a byte stream, so that directory is repacked into a standalone `.msg`

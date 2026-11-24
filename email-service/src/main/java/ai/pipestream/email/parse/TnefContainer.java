@@ -136,14 +136,45 @@ final class TnefContainer {
    */
   private static boolean emitBody(Contents contents, String path, ParseSink sink) {
     boolean emitted = false;
-    if (!contents.plain.isBlank()) {
-      sink.bodyPart(body(path + "/body:plain", BodyMediaType.BODY_MEDIA_TYPE_PLAIN, "text/plain",
-          contents.plain, "PidTagBody"));
+    BodyPart.Builder plain = BodyPart.newBuilder();
+    String plainText = contents.plain;
+    if (plainText.isEmpty() && !contents.attBody.isEmpty()) {
+      // attBody is 8-bit text in the stream's code page; strictly decoded,
+      // like the HTML bytes below.
+      String declared = CodePages.name(contents.codePage);
+      BodyText.Decoded decoded = BodyText.decode(
+          contents.attBody.getBytes(StandardCharsets.ISO_8859_1), declared,
+          path + "/body:plain", sink);
+      plainText = stripNul(decoded.text());
+      plain.setCharset(declared)
+          .setCharsetDetected(decoded.charsetDetected())
+          .setCharsetFallback(decoded.fallback())
+          .setUndecodableSequences(decoded.undecodableSequences());
+    }
+    if (!plainText.isBlank()) {
+      sink.bodyPart(plain.mergeFrom(body(path + "/body:plain", BodyMediaType.BODY_MEDIA_TYPE_PLAIN,
+          "text/plain", plainText, "PidTagBody")).build());
       emitted = true;
     }
-    if (!contents.html.isBlank()) {
-      sink.bodyPart(body(path + "/body:html", BodyMediaType.BODY_MEDIA_TYPE_HTML, "text/html",
-          contents.html, "PidTagHtml"));
+    BodyPart.Builder html = BodyPart.newBuilder();
+    String htmlText = contents.html;
+    if (htmlText.isEmpty() && contents.htmlBytes != null) {
+      // Stored as bytes in the code page PidTagInternetCodepage names. They
+      // are decoded strictly, by the same rule as an .eml body, so a body
+      // that does not fit its code page (or has none stored) is flagged on
+      // the BodyPart and warned about instead of quietly losing characters.
+      String declared = BodyText.codePageName(contents.internetCodePage);
+      BodyText.Decoded decoded =
+          BodyText.decode(contents.htmlBytes, declared, path + "/body:html", sink);
+      htmlText = stripNul(decoded.text());
+      html.setCharset(declared)
+          .setCharsetDetected(decoded.charsetDetected())
+          .setCharsetFallback(decoded.fallback())
+          .setUndecodableSequences(decoded.undecodableSequences());
+    }
+    if (!htmlText.isBlank()) {
+      sink.bodyPart(html.mergeFrom(body(path + "/body:html", BodyMediaType.BODY_MEDIA_TYPE_HTML,
+          "text/html", htmlText, "PidTagHtml")).build());
       emitted = true;
     }
     if (emitted || contents.rtf.isEmpty()) {
@@ -368,15 +399,6 @@ final class TnefContainer {
       contents.problems.add(contents.unreadableRecords
           + " MAPI property record(s) could not be read and were skipped, the first being "
           + contents.firstUnreadable);
-    }
-    if (contents.plain.isEmpty() && !contents.attBody.isEmpty()) {
-      contents.plain = stripNul(new String(
-          contents.attBody.getBytes(StandardCharsets.ISO_8859_1), contents.codePage));
-    }
-    if (contents.html.isEmpty() && contents.htmlBytes != null) {
-      Charset charset = codePage(contents.internetCodePage);
-      contents.html = stripNul(new String(contents.htmlBytes,
-          charset == null ? StandardCharsets.UTF_8 : charset));
     }
     for (Packed packed : contents.attachments) {
       packed.filename = firstNonEmpty(packed.longFilename, packed.title, packed.shortFilename);
