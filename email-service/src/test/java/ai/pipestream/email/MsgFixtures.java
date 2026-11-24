@@ -234,6 +234,78 @@ final class MsgFixtures {
     }
   }
 
+  /** Party property ids, for the fixtures that say how a party is stored. */
+  static final int PID_SENT_REPRESENTING_EMAIL_ADDRESS = 0x0065;
+  static final int PID_SENDER_ADDRESS_TYPE = 0x0C1E;
+  static final int PID_ADDRESS_TYPE = 0x3002;
+  static final int PID_SEARCH_KEY = 0x300B;
+  static final int PID_SMTP_ADDRESS = 0x39FE;
+  static final int PID_SENDER_SMTP_ADDRESS = 0x5D01;
+  static final int PID_SENT_REPRESENTING_SMTP_ADDRESS = 0x5D02;
+  static final int SENDER_NAME_PROPERTY = PID_SENDER_NAME;
+  static final int SENDER_EMAIL_PROPERTY = PID_SENDER_EMAIL_ADDRESS;
+  static final int TRANSPORT_HEADERS_PROPERTY = PID_TRANSPORT_MESSAGE_HEADERS;
+  static final int DISPLAY_NAME_PROPERTY = PID_DISPLAY_NAME;
+  static final int EMAIL_ADDRESS_PROPERTY = PID_EMAIL_ADDRESS;
+
+  /** One string property as a store would keep it. */
+  record StringProperty(int id, String value) {}
+
+  static StringProperty property(int id, String value) {
+    return new StringProperty(id, value);
+  }
+
+  /**
+   * One recipient storage: its PidTagRecipientType, its string properties,
+   * and its PidTagSearchKey (empty for none).
+   */
+  record StoredRecipient(int type, List<StringProperty> strings, byte[] searchKey) {
+
+    static StoredRecipient of(int type, StringProperty... strings) {
+      return new StoredRecipient(type, List.of(strings), new byte[0]);
+    }
+
+    StoredRecipient withSearchKey(String key) {
+      return new StoredRecipient(
+          type, strings, (key + "\0").getBytes(StandardCharsets.US_ASCII));
+    }
+  }
+
+  /**
+   * A message whose sender and recipients are stored exactly as given, so a
+   * test can place an Exchange directory name, an SMTP proxy property, or
+   * nothing at all, the way a mailbox export does.
+   */
+  static byte[] parties(List<StringProperty> message, List<StoredRecipient> recipients)
+      throws IOException {
+    try (POIFSFileSystem container = new POIFSFileSystem();
+         ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+      DirectoryEntry root = container.getRoot();
+      unicode(root, PID_SUBJECT, SUBJECT);
+      unicode(root, PID_BODY, PLAIN_BODY);
+      for (StringProperty property : message) {
+        unicode(root, property.id(), property.value());
+      }
+      for (int index = 0; index < recipients.size(); index++) {
+        StoredRecipient recipient = recipients.get(index);
+        DirectoryEntry storage =
+            root.createDirectory(String.format("__recip_version1.0_#%08X", index));
+        for (StringProperty property : recipient.strings()) {
+          unicode(storage, property.id(), property.value());
+        }
+        if (recipient.searchKey().length > 0) {
+          binary(storage, PID_SEARCH_KEY, recipient.searchKey());
+        }
+        storage.createDocument(PROPERTIES_STREAM, new ByteArrayInputStream(
+            storageProperties(List.of(longEntry(PID_RECIPIENT_TYPE, recipient.type())))));
+      }
+      root.createDocument(PROPERTIES_STREAM,
+          new ByteArrayInputStream(messageProperties(recipients.size(), 0, List.of())));
+      container.writeFilesystem(out);
+      return out.toByteArray();
+    }
+  }
+
   /** An OLE2 compound file that is not a MAPI message at all. */
   static byte[] ole2ButNotMapi() throws IOException {
     try (POIFSFileSystem container = new POIFSFileSystem();

@@ -62,7 +62,7 @@ Document projection below).
 
 | Event | When | Carries |
 |---|---|---|
-| `EmailInfo` | first, from headers alone | format, subject, role-tagged addresses, dates, message-id, in-reply-to (scalar plus every id), references, MAPI conversation topic and index for `.msg`, root content type, the full header list |
+| `EmailInfo` | first, from headers alone | format, subject, role-tagged addresses (name, addr-spec, and for `.msg` the stored non-SMTP address and its type), dates, message-id, in-reply-to (scalar plus every id), references, MAPI conversation topic and index for `.msg`, root content type, the full header list |
 | `BodyPart` | per text part, in MIME order | `part_id`, `PLAIN`/`HTML` + `content_type_raw`, UTF-8 text, declared charset, the charset actually used and whether it was a fallback, MAPI source property for `.msg` |
 | `Attachment` | per attachment, unless `omit_attachment_list` | index, filename, content type, size, content id, inline flag, optional bytes |
 | `Document` | once, immediately before the trailer, only when `emit_document` | the whole message as one `ai.pipestream.document.v1.Document` |
@@ -176,7 +176,18 @@ an invented page number.
   carry the signature but no readable record stay one opaque attachment,
   with a warning. Nothing inside a container is unpacked in turn.
 - **`.msg`**: POI `MAPIMessage`. Recipients are role-tagged from
-  `PidTagRecipientType` (1 to / 2 cc / 3 bcc). Bodies come from `PidTagBody`
+  `PidTagRecipientType` (1 to / 2 cc / 3 bcc). A party inside the sender's
+  Exchange organisation is stored under an X.500 directory name, not a
+  mailbox, so the SMTP address is looked for wherever the message can hold
+  it: `PidTagSenderSmtpAddress`, the represented party's SMTP address when
+  it is the same directory entry, and the transport `Sender` / `From`
+  header for the sender; `PidTagSmtpAddress`, a display name that is a bare
+  address, and an `SMTP:` search key for a recipient. The directory name
+  goes out in `Address.native_address` with `Address.address_type` (`EX`),
+  never in `address`; when no SMTP address exists anywhere, `address` is
+  empty and the parse is `STATE_PARTIAL` with a warning (one for the
+  sender, one counting the recipients). A recipient entry with neither a
+  name nor an address is left out and counted. Bodies come from `PidTagBody`
   and `PidTagHtml`; HTML wins over RTF, and an RTF-only message gets
   best-effort plain text with a `STATE_PARTIAL` warning, since v1 ships no
   RTF layout engine. The RTF's `\'hh` bytes are decoded in their code

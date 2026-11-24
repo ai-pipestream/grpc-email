@@ -183,8 +183,24 @@ message Address {
   // only a bare address.
   string name = 2;
   // The addr-spec, for example "clerk@example.gov". Empty when the message
-  // carried a group or a malformed mailbox that only had a display name.
+  // carried a group or a malformed mailbox that only had a display name, and
+  // empty for a .msg party the store kept only under a non-SMTP address (see
+  // native_address); the parse then carries a warning.
   string address = 3;
+  // .msg only: the address as the MAPI store kept it when that is not an
+  // SMTP addr-spec. For a party inside the sender's Exchange organisation
+  // this is the X.500 distinguished name (legacyExchangeDN), for example
+  // "/O=EXAMPLE/OU=EXCHANGE ADMINISTRATIVE GROUP/CN=RECIPIENTS/CN=CLERK". It
+  // is a directory path, not a mailbox, so it never goes in `address`. Set
+  // whether or not an SMTP address was also found. Empty for .eml and for a
+  // .msg party stored under its SMTP address.
+  string native_address = 4;
+  // .msg only: the MAPI address type the store recorded for this party
+  // (PidTagSenderAddressType, PidTagAddressType), as stored: "EX" for an
+  // Exchange directory entry, "SMTP" for an internet mailbox; MS-OXOABK lets
+  // a provider define others. Empty when the store recorded none, and for
+  // .eml.
+  string address_type = 5;
 }
 
 // One raw header line, in the order the message declared it, with

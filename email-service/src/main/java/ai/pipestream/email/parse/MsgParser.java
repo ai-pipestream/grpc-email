@@ -1,7 +1,6 @@
 package ai.pipestream.email.parse;
 
 import ai.pipestream.email.v1.Address;
-import ai.pipestream.email.v1.AddressRole;
 import ai.pipestream.email.v1.Attachment;
 import ai.pipestream.email.v1.BodyMediaType;
 import ai.pipestream.email.v1.BodyPart;
@@ -46,12 +45,6 @@ public final class MsgParser {
 
   /** Media type of an embedded Outlook message, matching the .msg container. */
   private static final String EMBEDDED_MESSAGE_MIMETYPE = "application/vnd.ms-outlook";
-
-  /** MAPI PidTagRecipientType values, per MS-OXOMSG. */
-  private static final int RECIPIENT_TYPE_FROM = 0;
-  private static final int RECIPIENT_TYPE_TO = 1;
-  private static final int RECIPIENT_TYPE_CC = 2;
-  private static final int RECIPIENT_TYPE_BCC = 3;
 
   private MsgParser() {}
 
@@ -129,16 +122,14 @@ public final class MsgParser {
         .setSubject(text(chunks.getSubjectChunk()))
         .setMessageId(HeaderProjection.stripAngles(text(chunks.getMessageId())));
 
-    Address sender = senderAddress(chunks);
+    // Read ahead of the address block: for an Exchange-internal sender the
+    // transport headers can be the only place the SMTP address survives.
+    String transport = text(chunks.getMessageHeaders());
+    Address sender = MsgParties.sender(chunks, transport, sink);
     if (sender != null) {
       info.addAddresses(sender);
     }
-    for (RecipientChunks recipient : recipients(message)) {
-      Address address = recipientAddress(recipient);
-      if (address != null) {
-        info.addAddresses(address);
-      }
-    }
+    info.addAllAddresses(MsgParties.recipients(recipients(message), sink));
 
     Timestamp submitted = time(chunks, MAPIProperty.CLIENT_SUBMIT_TIME);
     if (submitted == null) {
@@ -162,7 +153,6 @@ public final class MsgParser {
     // Transport headers are the only place a .msg keeps genuine RFC 822
     // headers. MAPI properties are not dressed up as headers here: an
     // invented Received line would be a lie about provenance.
-    String transport = text(chunks.getMessageHeaders());
     if (!transport.isEmpty()) {
       applyTransportHeaders(transport, info, sink);
     }
@@ -404,47 +394,6 @@ public final class MsgParser {
   private static RecipientChunks[] recipients(MAPIMessage message) {
     RecipientChunks[] found = message.getRecipientDetailsChunks();
     return found == null ? new RecipientChunks[0] : found;
-  }
-
-  private static Address recipientAddress(RecipientChunks recipient) {
-    String name = nullToEmpty(recipient.getRecipientName());
-    String email = nullToEmpty(recipient.getRecipientEmailAddress());
-    if (name.isEmpty() && email.isEmpty()) {
-      return null;
-    }
-    return HeaderProjection.address(role(recipient), name, email.contains("@") ? email : "");
-  }
-
-  private static AddressRole role(RecipientChunks recipient) {
-    Map<MAPIProperty, List<PropertyValue>> properties = recipient.getProperties();
-    List<PropertyValue> values =
-        properties == null ? null : properties.get(MAPIProperty.RECIPIENT_TYPE);
-    if (values == null || values.isEmpty()) {
-      // MS-OXOMSG makes PidTagRecipientType mandatory; when a producer omits
-      // it, "to" is the only defensible reading of a stored recipient.
-      return AddressRole.ADDRESS_ROLE_TO;
-    }
-    Object value = values.getFirst().getValue();
-    int type = value instanceof Number number ? number.intValue() : RECIPIENT_TYPE_TO;
-    return switch (type) {
-      case RECIPIENT_TYPE_FROM -> AddressRole.ADDRESS_ROLE_FROM;
-      case RECIPIENT_TYPE_TO -> AddressRole.ADDRESS_ROLE_TO;
-      case RECIPIENT_TYPE_CC -> AddressRole.ADDRESS_ROLE_CC;
-      case RECIPIENT_TYPE_BCC -> AddressRole.ADDRESS_ROLE_BCC;
-      default -> AddressRole.ADDRESS_ROLE_TO;
-    };
-  }
-
-  private static Address senderAddress(Chunks chunks) {
-    String name = text(chunks.getDisplayFromChunk());
-    String email = text(chunks.getEmailFromChunk());
-    // Exchange stores internal senders as an X.500 distinguished name; that
-    // is a directory path, not a mailbox, so it does not go in `address`.
-    String mailbox = email.contains("@") ? email : "";
-    if (name.isEmpty() && mailbox.isEmpty()) {
-      return null;
-    }
-    return HeaderProjection.address(AddressRole.ADDRESS_ROLE_FROM, name, mailbox);
   }
 
   private static Timestamp time(Chunks chunks, MAPIProperty property) {
