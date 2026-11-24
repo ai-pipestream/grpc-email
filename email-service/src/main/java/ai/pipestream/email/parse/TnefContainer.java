@@ -149,9 +149,9 @@ final class TnefContainer {
     if (emitted || contents.rtf.isEmpty()) {
       return emitted;
     }
-    String extracted;
+    RtfPlainText.Extracted extracted;
     try {
-      extracted = RtfPlainText.extract(contents.rtf);
+      extracted = RtfPlainText.read(contents.rtf);
     } catch (RuntimeException malformed) {
       sink.warn("TNEF container at part " + path
           + ": its RTF body could not be converted to text: " + malformed);
@@ -159,11 +159,14 @@ final class TnefContainer {
     }
     sink.warn("TNEF container at part " + path
         + ": RTF-only body: plain text extracted without layout, tables, or formatting");
-    if (extracted.isEmpty()) {
+    if (extracted.text().isEmpty()) {
       return false;
     }
-    sink.bodyPart(body(path + "/body:rtf", BodyMediaType.BODY_MEDIA_TYPE_PLAIN, "text/plain",
-        extracted, "PidTagRtfCompressed"));
+    BodyPart.Builder rtfBody = body(path + "/body:rtf", BodyMediaType.BODY_MEDIA_TYPE_PLAIN,
+        "text/plain", extracted.text(), "PidTagRtfCompressed").toBuilder();
+    RtfPlainText.describe(extracted, rtfBody,
+        "TNEF container at part " + path + ": its RTF body", sink);
+    sink.bodyPart(rtfBody.build());
     return true;
   }
 
@@ -417,31 +420,7 @@ final class TnefContainer {
 
   /** A Windows code page number as a charset, or null when this JVM has none for it. */
   private static Charset codePage(int number) {
-    if (number <= 0) {
-      return null;
-    }
-    switch (number) {
-      case 65001:
-        return StandardCharsets.UTF_8;
-      case 1200:
-        return StandardCharsets.UTF_16LE;
-      case 1201:
-        return StandardCharsets.UTF_16BE;
-      case 20127:
-        return StandardCharsets.US_ASCII;
-      case 28591:
-        return StandardCharsets.ISO_8859_1;
-      default:
-        break;
-    }
-    for (String name : new String[] {"windows-" + number, "cp" + number, "x-windows-" + number}) {
-      try {
-        return Charset.forName(name);
-      } catch (IllegalArgumentException unknown) {
-        // try the next spelling
-      }
-    }
-    return null;
+    return CodePages.charset(number);
   }
 
   private static Charset defaultCodePage() {

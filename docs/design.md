@@ -60,7 +60,11 @@ Options:
 Events, in order:
 
 1. `EmailInfo`: detected format (`EML`/`MSG`), subject, addresses,
-   dates, message-id, content-type of the root.
+   dates, message-id, content-type of the root. An `Address` is a name and
+   an addr-spec; a `.msg` party stored under an Exchange directory name
+   also carries it in `native_address` (with `address_type`), and has an
+   empty `address` plus a warning when the message holds no SMTP address
+   for it.
 2. `BodyPart`: `text/plain` and/or `text/html`, charset already decoded
    to UTF-8 (`charset_detected`, `charset_fallback` and
    `undecodable_sequences` say when the declared charset did not fit the

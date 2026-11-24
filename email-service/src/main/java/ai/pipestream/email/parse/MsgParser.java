@@ -1,7 +1,6 @@
 package ai.pipestream.email.parse;
 
 import ai.pipestream.email.v1.Address;
-import ai.pipestream.email.v1.AddressRole;
 import ai.pipestream.email.v1.Attachment;
 import ai.pipestream.email.v1.BodyMediaType;
 import ai.pipestream.email.v1.BodyPart;
@@ -16,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Calendar;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.poi.hsmf.MAPIMessage;
 import org.apache.poi.hsmf.datatypes.AttachmentChunks;
@@ -28,6 +28,7 @@ import org.apache.poi.hsmf.datatypes.PropertiesChunk;
 import org.apache.poi.hsmf.datatypes.PropertyValue;
 import org.apache.poi.hsmf.datatypes.RecipientChunks;
 import org.apache.poi.hsmf.datatypes.StringChunk;
+import org.apache.poi.hsmf.exceptions.ChunkNotFoundException;
 import org.apache.poi.poifs.filesystem.DirectoryNode;
 import org.apache.poi.poifs.filesystem.Entry;
 import org.apache.poi.poifs.filesystem.EntryUtils;
@@ -46,12 +47,6 @@ public final class MsgParser {
 
   /** Media type of an embedded Outlook message, matching the .msg container. */
   private static final String EMBEDDED_MESSAGE_MIMETYPE = "application/vnd.ms-outlook";
-
-  /** MAPI PidTagRecipientType values, per MS-OXOMSG. */
-  private static final int RECIPIENT_TYPE_FROM = 0;
-  private static final int RECIPIENT_TYPE_TO = 1;
-  private static final int RECIPIENT_TYPE_CC = 2;
-  private static final int RECIPIENT_TYPE_BCC = 3;
 
   private MsgParser() {}
 
@@ -129,16 +124,14 @@ public final class MsgParser {
         .setSubject(text(chunks.getSubjectChunk()))
         .setMessageId(HeaderProjection.stripAngles(text(chunks.getMessageId())));
 
-    Address sender = senderAddress(chunks);
+    // Read ahead of the address block: for an Exchange-internal sender the
+    // transport headers can be the only place the SMTP address survives.
+    String transport = text(chunks.getMessageHeaders());
+    Address sender = MsgParties.sender(chunks, transport, sink);
     if (sender != null) {
       info.addAddresses(sender);
     }
-    for (RecipientChunks recipient : recipients(message)) {
-      Address address = recipientAddress(recipient);
-      if (address != null) {
-        info.addAddresses(address);
-      }
-    }
+    info.addAllAddresses(MsgParties.recipients(recipients(message), sink));
 
     Timestamp submitted = time(chunks, MAPIProperty.CLIENT_SUBMIT_TIME);
     if (submitted == null) {
@@ -162,7 +155,6 @@ public final class MsgParser {
     // Transport headers are the only place a .msg keeps genuine RFC 822
     // headers. MAPI properties are not dressed up as headers here: an
     // invented Received line would be a lie about provenance.
-    String transport = text(chunks.getMessageHeaders());
     if (!transport.isEmpty()) {
       applyTransportHeaders(transport, info, sink);
     }
@@ -252,8 +244,9 @@ public final class MsgParser {
 
   /** Emits the bodies; true when at least one went out. */
   private static boolean bodies(MAPIMessage message, ParseSink sink) {
-    String plain = body(message::getTextBody);
-    String html = body(message::getHtmlBody);
+    AtomicBoolean unreadable = new AtomicBoolean();
+    String plain = body("PidTagBody", message::getTextBody, sink, unreadable);
+    String html = body("PidTagHtml", message::getHtmlBody, sink, unreadable);
     if (!plain.isEmpty()) {
       sink.bodyPart(
           BodyPart.newBuilder()
@@ -279,14 +272,18 @@ public final class MsgParser {
     }
     // HTML wins over RTF; RTF is the last resort, and v1 says so out loud
     // rather than pretending the layout survived.
-    String rtf = body(message::getRtfBody);
+    String rtf = body("PidTagRtfCompressed", message::getRtfBody, sink, unreadable);
     if (rtf.isEmpty()) {
-      sink.warn("message carries no plain, HTML, or RTF body");
+      // A body that is there and could not be read has its own warning
+      // above; "carries no body" would say the opposite of what happened.
+      if (!unreadable.get()) {
+        sink.warn("message carries no plain, HTML, or RTF body");
+      }
       return false;
     }
-    String extracted;
+    RtfPlainText.Extracted extracted;
     try {
-      extracted = RtfPlainText.extract(rtf);
+      extracted = RtfPlainText.read(rtf);
     } catch (RuntimeException malformed) {
       // A damaged RTF body costs the body, not the envelope and the
       // attachments around it.
@@ -294,17 +291,17 @@ public final class MsgParser {
       return false;
     }
     sink.warn("RTF-only body: plain text extracted without layout, tables, or formatting");
-    if (extracted.isEmpty()) {
+    if (extracted.text().isEmpty()) {
       return false;
     }
-    sink.bodyPart(
-        BodyPart.newBuilder()
-            .setPartId("body:rtf")
-            .setMediaType(BodyMediaType.BODY_MEDIA_TYPE_PLAIN)
-            .setContentTypeRaw("text/plain")
-            .setText(extracted)
-            .setSourceProperty("PidTagRtfCompressed")
-            .build());
+    BodyPart.Builder body = BodyPart.newBuilder()
+        .setPartId("body:rtf")
+        .setMediaType(BodyMediaType.BODY_MEDIA_TYPE_PLAIN)
+        .setContentTypeRaw("text/plain")
+        .setText(extracted.text())
+        .setSourceProperty("PidTagRtfCompressed");
+    RtfPlainText.describe(extracted, body, "RTF body", sink);
+    sink.bodyPart(body.build());
     return true;
   }
 
@@ -406,47 +403,6 @@ public final class MsgParser {
     return found == null ? new RecipientChunks[0] : found;
   }
 
-  private static Address recipientAddress(RecipientChunks recipient) {
-    String name = nullToEmpty(recipient.getRecipientName());
-    String email = nullToEmpty(recipient.getRecipientEmailAddress());
-    if (name.isEmpty() && email.isEmpty()) {
-      return null;
-    }
-    return HeaderProjection.address(role(recipient), name, email.contains("@") ? email : "");
-  }
-
-  private static AddressRole role(RecipientChunks recipient) {
-    Map<MAPIProperty, List<PropertyValue>> properties = recipient.getProperties();
-    List<PropertyValue> values =
-        properties == null ? null : properties.get(MAPIProperty.RECIPIENT_TYPE);
-    if (values == null || values.isEmpty()) {
-      // MS-OXOMSG makes PidTagRecipientType mandatory; when a producer omits
-      // it, "to" is the only defensible reading of a stored recipient.
-      return AddressRole.ADDRESS_ROLE_TO;
-    }
-    Object value = values.getFirst().getValue();
-    int type = value instanceof Number number ? number.intValue() : RECIPIENT_TYPE_TO;
-    return switch (type) {
-      case RECIPIENT_TYPE_FROM -> AddressRole.ADDRESS_ROLE_FROM;
-      case RECIPIENT_TYPE_TO -> AddressRole.ADDRESS_ROLE_TO;
-      case RECIPIENT_TYPE_CC -> AddressRole.ADDRESS_ROLE_CC;
-      case RECIPIENT_TYPE_BCC -> AddressRole.ADDRESS_ROLE_BCC;
-      default -> AddressRole.ADDRESS_ROLE_TO;
-    };
-  }
-
-  private static Address senderAddress(Chunks chunks) {
-    String name = text(chunks.getDisplayFromChunk());
-    String email = text(chunks.getEmailFromChunk());
-    // Exchange stores internal senders as an X.500 distinguished name; that
-    // is a directory path, not a mailbox, so it does not go in `address`.
-    String mailbox = email.contains("@") ? email : "";
-    if (name.isEmpty() && mailbox.isEmpty()) {
-      return null;
-    }
-    return HeaderProjection.address(AddressRole.ADDRESS_ROLE_FROM, name, mailbox);
-  }
-
   private static Timestamp time(Chunks chunks, MAPIProperty property) {
     Map<MAPIProperty, List<PropertyValue>> properties = chunks.getProperties();
     List<PropertyValue> values = properties == null ? null : properties.get(property);
@@ -468,12 +424,31 @@ public final class MsgParser {
     }
   }
 
-  /** Reads one body accessor, treating a missing chunk as "no such body". */
-  private static String body(BodyAccessor accessor) {
+  /**
+   * Reads one body. A body the message does not have is the empty string and
+   * nothing more: {@code setReturnNullOnMissingChunk(true)} makes POI answer
+   * null for it, and {@link ChunkNotFoundException} is the same fact from a
+   * getter that ignores the setting. Anything else POI throws is a body that
+   * exists and could not be read (a compressed RTF stream that does not
+   * decompress, a damaged chunk), which costs that body and is said out
+   * loud, under the property's name, so the trailer is STATE_PARTIAL with
+   * the true cause.
+   *
+   * @param unreadable set when the read failed, left alone otherwise
+   */
+  private static String body(
+      String property, BodyAccessor accessor, ParseSink sink, AtomicBoolean unreadable) {
     try {
       String value = accessor.get();
       return value == null ? "" : value;
-    } catch (Exception missing) {
+    } catch (ChunkNotFoundException missing) {
+      return "";
+    } catch (Exception failed) {
+      unreadable.set(true);
+      String cause = failed.getMessage() == null || failed.getMessage().isBlank()
+          ? failed.getClass().getSimpleName()
+          : failed.getMessage();
+      sink.warn("body " + property + " is present but could not be read: " + cause);
       return "";
     }
   }
@@ -481,7 +456,7 @@ public final class MsgParser {
   /** A MAPIMessage body getter, all of which declare ChunkNotFoundException. */
   @FunctionalInterface
   private interface BodyAccessor {
-    String get() throws Exception;
+    String get() throws ChunkNotFoundException;
   }
 
   private static String text(StringChunk chunk) {
