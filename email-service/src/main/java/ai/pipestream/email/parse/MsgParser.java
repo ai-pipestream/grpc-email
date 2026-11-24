@@ -15,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Calendar;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.poi.hsmf.MAPIMessage;
 import org.apache.poi.hsmf.datatypes.AttachmentChunks;
@@ -27,6 +28,7 @@ import org.apache.poi.hsmf.datatypes.PropertiesChunk;
 import org.apache.poi.hsmf.datatypes.PropertyValue;
 import org.apache.poi.hsmf.datatypes.RecipientChunks;
 import org.apache.poi.hsmf.datatypes.StringChunk;
+import org.apache.poi.hsmf.exceptions.ChunkNotFoundException;
 import org.apache.poi.poifs.filesystem.DirectoryNode;
 import org.apache.poi.poifs.filesystem.Entry;
 import org.apache.poi.poifs.filesystem.EntryUtils;
@@ -242,8 +244,9 @@ public final class MsgParser {
 
   /** Emits the bodies; true when at least one went out. */
   private static boolean bodies(MAPIMessage message, ParseSink sink) {
-    String plain = body(message::getTextBody);
-    String html = body(message::getHtmlBody);
+    AtomicBoolean unreadable = new AtomicBoolean();
+    String plain = body("PidTagBody", message::getTextBody, sink, unreadable);
+    String html = body("PidTagHtml", message::getHtmlBody, sink, unreadable);
     if (!plain.isEmpty()) {
       sink.bodyPart(
           BodyPart.newBuilder()
@@ -269,9 +272,13 @@ public final class MsgParser {
     }
     // HTML wins over RTF; RTF is the last resort, and v1 says so out loud
     // rather than pretending the layout survived.
-    String rtf = body(message::getRtfBody);
+    String rtf = body("PidTagRtfCompressed", message::getRtfBody, sink, unreadable);
     if (rtf.isEmpty()) {
-      sink.warn("message carries no plain, HTML, or RTF body");
+      // A body that is there and could not be read has its own warning
+      // above; "carries no body" would say the opposite of what happened.
+      if (!unreadable.get()) {
+        sink.warn("message carries no plain, HTML, or RTF body");
+      }
       return false;
     }
     RtfPlainText.Extracted extracted;
@@ -417,12 +424,31 @@ public final class MsgParser {
     }
   }
 
-  /** Reads one body accessor, treating a missing chunk as "no such body". */
-  private static String body(BodyAccessor accessor) {
+  /**
+   * Reads one body. A body the message does not have is the empty string and
+   * nothing more: {@code setReturnNullOnMissingChunk(true)} makes POI answer
+   * null for it, and {@link ChunkNotFoundException} is the same fact from a
+   * getter that ignores the setting. Anything else POI throws is a body that
+   * exists and could not be read (a compressed RTF stream that does not
+   * decompress, a damaged chunk), which costs that body and is said out
+   * loud, under the property's name, so the trailer is STATE_PARTIAL with
+   * the true cause.
+   *
+   * @param unreadable set when the read failed, left alone otherwise
+   */
+  private static String body(
+      String property, BodyAccessor accessor, ParseSink sink, AtomicBoolean unreadable) {
     try {
       String value = accessor.get();
       return value == null ? "" : value;
-    } catch (Exception missing) {
+    } catch (ChunkNotFoundException missing) {
+      return "";
+    } catch (Exception failed) {
+      unreadable.set(true);
+      String cause = failed.getMessage() == null || failed.getMessage().isBlank()
+          ? failed.getClass().getSimpleName()
+          : failed.getMessage();
+      sink.warn("body " + property + " is present but could not be read: " + cause);
       return "";
     }
   }
@@ -430,7 +456,7 @@ public final class MsgParser {
   /** A MAPIMessage body getter, all of which declare ChunkNotFoundException. */
   @FunctionalInterface
   private interface BodyAccessor {
-    String get() throws Exception;
+    String get() throws ChunkNotFoundException;
   }
 
   private static String text(StringChunk chunk) {

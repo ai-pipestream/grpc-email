@@ -190,7 +190,10 @@ an invented page number.
   name nor an address is left out and counted. Bodies come from `PidTagBody`
   and `PidTagHtml`; HTML wins over RTF, and an RTF-only message gets
   best-effort plain text with a `STATE_PARTIAL` warning, since v1 ships no
-  RTF layout engine. The RTF's `\'hh` bytes are decoded in their code
+  RTF layout engine. A body that is present and cannot be read (a
+  compressed RTF stream that does not decompress, say) is warned about
+  under its property name with the cause; only a message with no body
+  property at all is reported as carrying no body. The RTF's `\'hh` bytes are decoded in their code
   page (the document's `\ansicpg`, 1252 by default, or the one the font in
   force names with `\fcharset` or `\cpg`), double-byte code pages
   included; `BodyPart.charset_detected` names it, and a code page this
