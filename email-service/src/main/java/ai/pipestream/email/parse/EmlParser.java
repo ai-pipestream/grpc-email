@@ -16,7 +16,9 @@ import jakarta.mail.util.SharedByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Locale;
 import java.util.Properties;
+import java.util.Set;
 
 /**
  * Walks an RFC 822 MIME tree and streams each leaf the moment it is decoded.
@@ -93,8 +95,47 @@ public final class EmlParser {
       throw new InvalidEmailException(
           "unreadable RFC 822 message: " + unreadable.getMessage(), unreadable);
     }
-    walk(message, "1", 1, options, sink,
-        new WalkState((long) MAX_MULTIPART_SCAN_FACTOR * bytes.length));
+    WalkState state = new WalkState((long) MAX_MULTIPART_SCAN_FACTOR * bytes.length);
+    walk(message, "1", 1, options, sink, state);
+    reportMissingBody(message, state, sink);
+  }
+
+  /** S/MIME smime-type values that are not an encryption envelope. */
+  private static final Set<String> SMIME_NOT_ENCRYPTED =
+      Set.of("signed-data", "compressed-data", "certs-only");
+
+  /**
+   * Says what the walk left unread. A message whose root is an encryption
+   * envelope is flagged as encrypted, whatever else it carries; a message
+   * that produced no body part at all says so, with the reason when the
+   * root's own type gives one. Without this an encrypted message came back
+   * as one attachment, no body parts, no warnings and STATE_OK, which reads
+   * as a clean parse of a message with nothing to say.
+   */
+  private static void reportMissingBody(MimeMessage message, WalkState state, ParseSink sink) {
+    String contentType = header(message, "Content-Type", "text/plain");
+    String rootType = HeaderProjection.baseType(contentType);
+    boolean smime = rootType.equals("application/pkcs7-mime")
+        || rootType.equals("application/x-pkcs7-mime");
+    String smimeType = smime ? parameter(contentType, "smime-type").toLowerCase(Locale.ROOT) : "";
+    if (rootType.equals("multipart/encrypted")
+        || (smime && !SMIME_NOT_ENCRYPTED.contains(smimeType))) {
+      sink.encrypted();
+      sink.warn("message is encrypted (" + rootType
+          + (smimeType.isEmpty() ? "" : "; smime-type=" + smimeType)
+          + "); its content was not read and the encrypted payload is listed as an attachment");
+      return;
+    }
+    if (state.bodyEmitted) {
+      return;
+    }
+    if (smime) {
+      sink.warn("message is an S/MIME " + smimeType + " object (" + rootType + "), which this"
+          + " service does not open; no body was read and the object is listed as an"
+          + " attachment");
+      return;
+    }
+    sink.warn("message carries no text/plain or text/html body");
   }
 
   /**

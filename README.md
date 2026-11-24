@@ -62,11 +62,11 @@ Document projection below).
 
 | Event | When | Carries |
 |---|---|---|
-| `EmailInfo` | first, from headers alone | format, subject, role-tagged addresses (name, addr-spec, and for `.msg` the stored non-SMTP address and its type), dates, message-id, in-reply-to (scalar plus every id), references, MAPI conversation topic and index for `.msg`, root content type, the full header list |
+| `EmailInfo` | first, from headers alone | format, subject, role-tagged addresses (name, addr-spec, and for `.msg` the stored non-SMTP address and its type), dates, message-id, in-reply-to (scalar plus every id), references, MAPI conversation topic and index for `.msg`, root content type, the full header list, and `unparsed_headers`: the names of headers that were present but could not be read (a `Date` that will not parse, a `Received` date clause that will not parse, an address list part kept verbatim), each with a `STATE_PARTIAL` warning |
 | `BodyPart` | per text part, in MIME order | `part_id`, `PLAIN`/`HTML` + `content_type_raw`, UTF-8 text, declared charset, the charset actually used and whether it was a fallback, MAPI source property for `.msg` |
 | `Attachment` | per attachment, unless `omit_attachment_list` | index, filename, content type, size, content id, inline flag, optional bytes |
 | `Document` | once, immediately before the trailer, only when `emit_document` | the whole message as one `ai.pipestream.document.v1.Document` |
-| `ParseStatus` | last, exactly once | `STATE_OK` / `STATE_PARTIAL`, warnings (the first 100, then a count of the rest), counts, message size |
+| `ParseStatus` | last, exactly once | `STATE_OK` / `STATE_PARTIAL`, warnings (the first 100, then a count of the rest), counts, message size, `encrypted` |
 
 Format is detected from the bytes (OLE2 signature, or an RFC 822 header block
 that carries at least one real mail field). The advisory content type is never
@@ -120,11 +120,14 @@ becomes `Document.email`, the schema's own typed slot: every mailbox an
 `EmailParty` with its display name and its addr-spec apart, every threading id
 its own repeated element, the conversation index the packed bytes it is, and
 the sent instant a `Timestamp` beside `sent_raw`, the Date header's own
-spelling. Nothing that has a typed home is also written into a map; the two
-roles the schema does not model (`Reply-To`, `Sender`) stay in the body group's
-`meta.custom_fields`, still split into `name` and `address`. Each `text/plain` part
-becomes one `TextItem` per blank-line-separated paragraph, tagged with its
-`email.part_id`. Listed attachments become a `GROUP_LABEL_LIST` group named
+spelling. `Reply-To` and `Sender` are parties too (`reply_to`, `sender`), the
+delivery time is `received` beside `received_raw`, the root part's declared
+type is `content_type`, and an Exchange or X.400 address rides on its party as
+`native_address` with its `address_type`. The fold writes nothing into
+`custom_fields` or `extra`: every fact has a typed field. Each `text/plain` part
+becomes one `TextItem` per blank-line-separated paragraph, and every item that
+came from a part names it in a second `source` entry, a typed `MimePartSource`
+(`part_id`, `content_id`, `content_type`). Listed attachments become a `GROUP_LABEL_LIST` group named
 `attachments`, one line per attachment. An inline image (`inline`, `image/*`,
 with a content id) becomes a `PictureItem` whose `ImageRef.uri` is
 **`part:<part_id>`**, a pointer into the typed stream you are already reading
@@ -133,9 +136,13 @@ with a content id) becomes a `PictureItem` whose `ImageRef.uri` is
 never embedded: a Document is one gRPC message, and attachment payloads
 belong on `Attachment.data`.
 
-Not mapped, deliberately: HTML bodies (the HTML collector parses those, and
-its items merge into this fragment downstream), the lossless header list, and
-provenance. Email has no pages, so `prov` stays empty rather than carrying
+Not parsed, deliberately: HTML bodies (the HTML collector parses those, and
+its items merge into this fragment downstream). The Document still names
+each one: a `SubDocumentRef` in `Document.attachments` with `kind` `body`,
+id `part:<part_id>` (the `BodyPart` event with that part id), media type
+`text/html` and the size of its text, so a client of the Document alone can
+tell that an HTML-only message has a body it must send to another parser.
+Not mapped at all: the lossless header list, and provenance. Email has no pages, so `prov` stays empty rather than carrying
 an invented page number.
 
 ## Formats
@@ -161,7 +168,12 @@ an invented page number.
   32 levels deep and over at most eight times the message's size in
   multipart bytes (Jakarta Mail rescans each level to find its boundaries);
   a subtree past either bound is emitted whole, as one opaque attachment,
-  with a warning.
+  with a warning. A message that yields no `text/plain` or `text/html` body
+  says so in a warning. When its root is an encryption envelope (S/MIME
+  `application/pkcs7-mime` other than signed, compressed or certs-only, or
+  `multipart/encrypted`), `ParseStatus.encrypted` is set, the warning says
+  the content was not read, and the sealed payload is listed as an
+  attachment; nothing here decrypts.
 - **TNEF (`winmail.dat`, `application/ms-tnef`)**, in either format: an
   attachment whose bytes carry the TNEF signature is unpacked, whatever it
   was labelled. The attachments inside it take its place, named under the
@@ -198,12 +210,21 @@ an invented page number.
   force names with `\fcharset` or `\cpg`), double-byte code pages
   included; `BodyPart.charset_detected` names it, and a code page this
   service cannot decode keeps its bytes as ISO-8859-1 with
-  `charset_fallback` set and a warning. Transport headers are surfaced when the message kept
+  `charset_fallback` set and a warning. An HTML body stored as bytes is
+  decoded strictly in the code page `PidTagInternetCodepage` names, by the
+  same rule as an `.eml` body: when the bytes do not fit it, or no code page
+  is stored and they are not US-ASCII, the body is read as UTF-8 when valid
+  and otherwise windows-1252, flagged on the `BodyPart` and warned about
+  (the same holds for an HTML body or an `attBody` inside a TNEF
+  container). Transport headers are surfaced when the message kept
   them; MAPI properties are never dressed up as headers they are not.
   Outlook stores an embedded message as a nested storage directory rather
   than a byte stream, so that directory is repacked into a standalone `.msg`
   and emitted as the attachment's payload: the nested message is deferred to
-  the coordinator, not destroyed.
+  the coordinator, not destroyed. An attachment with neither a data stream
+  nor an embedded storage (a file attached by reference) is listed with
+  size 0 and a warning. `PidTagConversationIndex` rides as
+  `EmailInfo.conversation_index_raw`, the bytes the store kept.
 
 Out of scope for v1: sending mail, IMAP/POP, PST/OST, S/MIME decryption, DKIM
 verification, expanding embedded `message/rfc822` and Outlook attachments in

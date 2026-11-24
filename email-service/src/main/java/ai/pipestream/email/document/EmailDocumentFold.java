@@ -13,6 +13,7 @@ import ai.pipestream.document.v1.GroupItem;
 import ai.pipestream.document.v1.GroupLabel;
 import ai.pipestream.document.v1.ImageRef;
 import ai.pipestream.document.v1.ListItem;
+import ai.pipestream.document.v1.MimePartSource;
 import ai.pipestream.document.v1.PictureItem;
 import ai.pipestream.document.v1.RefItem;
 import ai.pipestream.document.v1.SourceType;
@@ -21,7 +22,6 @@ import ai.pipestream.document.v1.TextItem;
 import ai.pipestream.document.v1.TextItemBase;
 import ai.pipestream.document.v1.TitleItem;
 import ai.pipestream.email.v1.Address;
-import ai.pipestream.email.v1.AddressRole;
 import ai.pipestream.email.v1.Attachment;
 import ai.pipestream.email.v1.BodyMediaType;
 import ai.pipestream.email.v1.BodyPart;
@@ -29,20 +29,15 @@ import ai.pipestream.email.v1.EmailFormat;
 import ai.pipestream.email.v1.EmailInfo;
 import ai.pipestream.email.v1.Header;
 import ai.pipestream.email.v1.ParseEmailResponse;
-import com.google.protobuf.ByteString;
-import com.google.protobuf.ListValue;
-import com.google.protobuf.Struct;
 import com.google.protobuf.Timestamp;
-import com.google.protobuf.Value;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -73,16 +68,19 @@ import java.util.TreeMap;
  *       a typed home is written into a map as well; the lossless header list
  *       stays on {@link EmailInfo}, because a Document is not a place to dump
  *       headers.
- *   <li>The two roles the schema's envelope has no slot for -- Reply-To and
- *       Sender -- stay in the body group's {@code meta.custom_fields}, still
- *       split into name and address rather than rendered into a display
- *       string, alongside the delivery time and the root content type.
+ *   <li>Reply-To and Sender, the delivery time and the root content type
+ *       are typed fields of that same envelope, and the caller's advisory
+ *       content type is {@code DocumentOrigin.declared_mimetype}. The fold
+ *       writes nothing into {@code custom_fields} or {@code extra}.
  *   <li>The subject additionally becomes a {@link TitleItem}, the first body
  *       child.
  *   <li>Each {@code text/plain} body part becomes one {@link TextItem} per
  *       blank-line-separated paragraph.
- *   <li>HTML body parts are not parsed and not mapped. Parsing HTML is the
- *       HTML collector's job; its items merge into this fragment downstream.
+ *   <li>HTML body parts are not parsed and produce no items. Parsing HTML is
+ *       the HTML collector's job; its items merge into this fragment
+ *       downstream. Each one is registered as a {@link SubDocumentRef} of
+ *       kind "body" in {@code Document.attachments}, so the Document names
+ *       the body it did not parse.
  *   <li>Attachment events -- emitted unless the client opted out of the
  *       listing -- become a {@link GroupLabel#GROUP_LABEL_LIST} group named
  *       "attachments" for readers, and one {@link SubDocumentRef} in
@@ -91,7 +89,8 @@ import java.util.TreeMap;
  *       a {@link PictureItem} whose {@link ImageRef} points at the typed
  *       stream with that URI rather than embedding bytes.
  *   <li>No provenance. Email has no pages and no boxes, so {@code prov} stays
- *       empty and source locators ride in per-item {@code custom_fields}
+ *       empty. Where an item came from is a typed {@link MimePartSource}
+ *       in its {@code source}, beside the collector that produced it,
  *       instead of an invented page number.
  *   <li>No {@code field_regions} / {@code field_items}: the downstream
  *       additive merge does not renumber those and would silently drop them.
@@ -127,22 +126,24 @@ public final class EmailDocumentFold {
   /** Media type of the .msg container, for {@link DocumentOrigin}. */
   public static final String MSG_MIMETYPE = "application/vnd.ms-outlook";
 
+  /** Media type of an HTML body whose part declared none. */
+  private static final String HTML_MIMETYPE = "text/html";
+
+  /**
+   * {@link SubDocumentRef#getKind()} of a message body registered because
+   * this fold does not parse it, as against an attachment, which has none.
+   */
+  public static final String BODY_KIND = "body";
+
   private static final String BODY_REF = "#/body";
   private static final String FURNITURE_REF = "#/furniture";
   private static final String GROUPS_PREFIX = "#/groups/";
   private static final String ATTACHMENTS_GROUP_NAME = "attachments";
-  private static final String KEY_PART_ID = "email.part_id";
-  private static final String KEY_CONTENT_ID = "email.content_id";
-  private static final String KEY_DECLARED_CONTENT_TYPE = "email.declared_content_type";
-  private static final String KEY_RECEIVED_DATE = "email.received_date";
-  private static final String KEY_CONTENT_TYPE = "email.content_type";
-
-  /** Field names of a mailbox rendered as a struct in the open-vocabulary map. */
-  private static final String PARTY_NAME = "name";
-  private static final String PARTY_ADDRESS = "address";
-
   /** The RFC 822 field whose value is the origination date's own spelling. */
   private static final String DATE_HEADER = "Date";
+
+  /** The RFC 822 field whose topmost instance carries the delivery time. */
+  private static final String RECEIVED_HEADER = "Received";
 
   private final String version;
   private final SourceOrigin source;
@@ -318,9 +319,11 @@ public final class EmailDocumentFold {
       document.getOriginBuilder().setMimetype(mimetype);
     }
 
-    Map<String, Value> facts = envelopeFacts(info);
-    if (!facts.isEmpty()) {
-      document.getBodyBuilder().getMetaBuilder().putAllCustomFields(facts);
+    if (!source.contentType().isEmpty()) {
+      // The caller's claim about the bytes, in its own typed slot beside the
+      // mimetype the bytes themselves decided; the two disagreeing is a fact
+      // worth keeping rather than one to resolve here.
+      document.getOriginBuilder().setDeclaredMimetype(source.contentType());
     }
     emailMeta(info);
     sourceMeta(info);
@@ -348,8 +351,11 @@ public final class EmailDocumentFold {
    * instant. A message whose date came from a MAPI property rather than a
    * header has an instant and no spelling, which is equally honest.
    *
-   * <p>Reply-To and Sender have no slot here and stay in the body group's
-   * open-vocabulary map; see {@link #envelopeFacts}.
+   * <p>Reply-To, Sender, the delivery time and the root content type are
+   * typed fields here too. They used to ride the body group's
+   * {@code custom_fields} as a list of structs and an RFC 3339 string, which a
+   * consumer had to know the key vocabulary of and parse back; nothing of
+   * the envelope is written into a map any more.
    */
   private void emailMeta(EmailInfo info) {
     EmailMeta.Builder email = EmailMeta.newBuilder();
@@ -359,7 +365,9 @@ public final class EmailDocumentFold {
         case ADDRESS_ROLE_TO -> email.addTo(party(address));
         case ADDRESS_ROLE_CC -> email.addCc(party(address));
         case ADDRESS_ROLE_BCC -> email.addBcc(party(address));
-        default -> { /* reply-to and sender have no slot in EmailMeta */ }
+        case ADDRESS_ROLE_REPLY_TO -> email.addReplyTo(party(address));
+        case ADDRESS_ROLE_SENDER -> email.addSender(party(address));
+        case ADDRESS_ROLE_UNSPECIFIED, UNRECOGNIZED -> { /* never set by the parsers */ }
       }
     }
     if (!info.getMessageId().isEmpty()) {
@@ -370,9 +378,9 @@ public final class EmailDocumentFold {
     if (!info.getConversationTopic().isEmpty()) {
       email.setConversationTopic(info.getConversationTopic());
     }
-    ByteString conversationIndex = decode(info.getConversationIndex());
-    if (!conversationIndex.isEmpty()) {
-      email.setConversationIndex(conversationIndex);
+    // Bytes in, bytes out: the index is never text on the way.
+    if (!info.getConversationIndexRaw().isEmpty()) {
+      email.setConversationIndex(info.getConversationIndexRaw());
     }
     if (info.hasDate()) {
       email.setSent(info.getDate());
@@ -381,57 +389,52 @@ public final class EmailDocumentFold {
     if (!sentRaw.isEmpty()) {
       email.setSentRaw(sentRaw);
     }
+    // Delivery time: the parsed instant, and beside it the Received header's
+    // own date clause when the message has one. A clause that does not parse
+    // sets the raw twin alone; a MAPI delivery time has an instant and no
+    // spelling.
+    if (info.hasReceivedDate()) {
+      email.setReceived(info.getReceivedDate());
+    }
+    String receivedRaw = receivedClause(header(info, RECEIVED_HEADER));
+    if (!receivedRaw.isEmpty()) {
+      email.setReceivedRaw(receivedRaw);
+    }
+    if (!info.getContentType().isEmpty()) {
+      email.setContentType(info.getContentType());
+    }
     EmailMeta built = email.build();
     if (!EmailMeta.getDefaultInstance().equals(built)) {
       document.setEmail(built);
     }
   }
 
-  /** One mailbox with its display name and its addr-spec kept apart. */
+  /**
+   * One mailbox with its display name and its addr-spec kept apart, and for
+   * a .msg party the store kept under a non-SMTP address, that address and
+   * its type beside them.
+   */
   private static EmailParty party(Address address) {
     EmailParty.Builder party = EmailParty.newBuilder().setAddress(address.getAddress());
     if (!address.getName().isEmpty()) {
       party.setName(address.getName());
     }
+    if (!address.getNativeAddress().isEmpty()) {
+      party.setNativeAddress(address.getNativeAddress());
+    }
+    if (!address.getAddressType().isEmpty()) {
+      party.setAddressType(address.getAddressType());
+    }
     return party.build();
   }
 
   /**
-   * The message's conversation index as the bytes it is.
-   *
-   * <p>{@code EmailInfo.conversation_index} carries the MAPI property's
-   * lowercase hex, and the RFC 822 spelling of the same structure
-   * (Thread-Index) is base64, so both are accepted and neither is written
-   * into the Document as text: the field is {@code bytes} because a prefix
-   * comparison over the raw structure is what orders a thread, and a hex
-   * string compares by the wrong thing. A value that is neither spelling is
-   * dropped rather than turned into bytes it never meant.
+   * The date clause of a Received header value, as written: the text after
+   * its last semicolon. Empty when there is no header or no clause.
    */
-  private static ByteString decode(String value) {
-    if (value.isEmpty()) {
-      return ByteString.EMPTY;
-    }
-    if (value.length() % 2 == 0 && value.chars().allMatch(EmailDocumentFold::isHexDigit)) {
-      byte[] bytes = new byte[value.length() / 2];
-      for (int index = 0; index < bytes.length; index++) {
-        bytes[index] = (byte) ((digit(value.charAt(index * 2)) << 4)
-            | digit(value.charAt(index * 2 + 1)));
-      }
-      return ByteString.copyFrom(bytes);
-    }
-    try {
-      return ByteString.copyFrom(Base64.getDecoder().decode(value));
-    } catch (IllegalArgumentException notBase64) {
-      return ByteString.EMPTY;
-    }
-  }
-
-  private static boolean isHexDigit(int character) {
-    return Character.digit(character, 16) >= 0;
-  }
-
-  private static int digit(char character) {
-    return Character.digit(character, 16);
+  private static String receivedClause(String received) {
+    int semicolon = received.lastIndexOf(';');
+    return semicolon < 0 ? "" : received.substring(semicolon + 1).strip();
   }
 
   /**
@@ -459,12 +462,10 @@ public final class EmailDocumentFold {
    * twin rule the schema states: an unparseable header sets the raw field
    * alone.
    *
-   * <p>Nothing else goes here. Everything the previous shape squeezed into
-   * {@code extra} as text -- the addresses, the threading ids, the
-   * conversation properties -- now has a typed home on {@code Document.email}
-   * and is written there and only there. What remains is the caller's
-   * advisory content type, which is genuinely open vocabulary: a claim about
-   * the bytes rather than a fact of the message.
+   * <p>Nothing else goes here, and nothing goes into {@code extra}: the
+   * addresses, the threading ids and the conversation properties have typed
+   * homes on {@code Document.email}, and the caller's advisory content type
+   * has one on {@code DocumentOrigin.declared_mimetype}.
    */
   private void sourceMeta(EmailInfo info) {
     DocumentMeta.Builder meta = DocumentMeta.newBuilder();
@@ -479,78 +480,10 @@ public final class EmailDocumentFold {
       meta.setCreatedRaw(createdRaw);
     }
 
-    // The caller's advisory content type, recorded where it cannot be
-    // mistaken for the detected one. origin.mimetype stays what the bytes
-    // said; this is what the caller claimed, and the two disagreeing is a
-    // fact worth keeping rather than one to resolve here.
-    if (!source.contentType().isEmpty()) {
-      meta.putExtra(KEY_DECLARED_CONTENT_TYPE, source.contentType());
-    }
-
     DocumentMeta built = meta.build();
     if (!DocumentMeta.getDefaultInstance().equals(built)) {
       document.setSourceMeta(built);
     }
-  }
-
-  /**
-   * The envelope facts the canonical schema has no typed home for: the two
-   * address roles {@link EmailMeta} does not model, the delivery time, and
-   * the root content type. Absent facts are absent keys, never empty strings,
-   * so a consumer can tell "the message had no Reply-To" from "the Reply-To
-   * was empty".
-   *
-   * <p>A mailbox here is still a struct of {@code name} and {@code address},
-   * not a rendered display string: the map is open vocabulary about which
-   * keys exist, which is no licence to fuse two fields into one value that
-   * the reader would have to parse RFC 822 grammar back out of.
-   *
-   * <p>These land on the body group, whose {@code custom_fields} are
-   * first-writer-wins in the coordinator's merge: another collector's
-   * fragment for the same document will not overwrite them, and this fold
-   * must not count on overwriting anyone either.
-   */
-  private static Map<String, Value> envelopeFacts(EmailInfo info) {
-    Map<String, Value> facts = new LinkedHashMap<>();
-    Map<String, List<Value>> byRole = new LinkedHashMap<>();
-    for (Address address : info.getAddressesList()) {
-      String key = key(address.getRole());
-      if (!key.isEmpty()) {
-        byRole.computeIfAbsent(key, role -> new ArrayList<>()).add(structured(address));
-      }
-    }
-    byRole.forEach((key, values) -> facts.put(key, list(values)));
-    if (info.hasReceivedDate()) {
-      facts.put(KEY_RECEIVED_DATE, string(rfc3339(info.getReceivedDate())));
-    }
-    if (!info.getContentType().isEmpty()) {
-      facts.put(KEY_CONTENT_TYPE, string(info.getContentType()));
-    }
-    return facts;
-  }
-
-  /** One mailbox as a struct, so name and address stay two facts. */
-  private static Value structured(Address address) {
-    Struct.Builder party = Struct.newBuilder();
-    if (!address.getName().isEmpty()) {
-      party.putFields(PARTY_NAME, string(address.getName()));
-    }
-    if (!address.getAddress().isEmpty()) {
-      party.putFields(PARTY_ADDRESS, string(address.getAddress()));
-    }
-    return Value.newBuilder().setStructValue(party).build();
-  }
-
-  /**
-   * The custom-fields key for a role, or empty for every role that has a
-   * typed home on {@link EmailMeta} and must not be duplicated into a map.
-   */
-  private static String key(AddressRole role) {
-    return switch (role) {
-      case ADDRESS_ROLE_REPLY_TO -> "email.reply_to";
-      case ADDRESS_ROLE_SENDER -> "email.sender";
-      default -> "";
-    };
   }
 
   /** The wire format as the lowercase dialect name stamped on every item. */
@@ -571,24 +504,58 @@ public final class EmailDocumentFold {
     };
   }
 
-  private static String rfc3339(Timestamp timestamp) {
-    return Instant.ofEpochSecond(timestamp.getSeconds(), timestamp.getNanos()).toString();
-  }
-
   // --- bodies -------------------------------------------------------------
 
   /**
-   * Maps a plain-text body part to one text item per paragraph. HTML parts
-   * are skipped whole: this collector hands HTML to the HTML collector
+   * Maps a plain-text body part to one text item per paragraph. An HTML part
+   * produces no items: this collector hands HTML to the HTML collector
    * verbatim on the typed stream and refuses to guess at its structure here.
+   * It is registered instead, so the Document says a body exists that it did
+   * not parse; see {@link #registerBody}.
    */
   private void bodyPart(BodyPart part) {
     if (part.getMediaType() != BodyMediaType.BODY_MEDIA_TYPE_PLAIN) {
+      registerBody(part);
       return;
     }
+    MimePartSource located = part(part.getPartId(), "", part.getContentTypeRaw());
     for (String paragraph : paragraphs(part.getText())) {
-      addText(BODY_REF, paragraph, Map.of(KEY_PART_ID, string(part.getPartId())));
+      addText(BODY_REF, paragraph, located);
     }
+  }
+
+  /**
+   * Registers a body this fold does not map as a nested payload a downstream
+   * parser can be pointed at.
+   *
+   * <p>Without it an HTML-only message, which is most marketing mail and a
+   * good deal of what mail clients write, folds into a title and an
+   * attachment list, and nothing in the Document says a body was left out.
+   * The entry is a {@link SubDocumentRef} in the same registry and with the
+   * same {@code part:<part_id>} pointer as an attachment; the pointer
+   * resolves to the BodyPart event with that part id on the typed stream.
+   * {@code kind} is "body" so a reader can tell it from an attachment, the
+   * size is that of the text as the stream carries it (UTF-8), and it has no
+   * name and no item ref because the message gave it neither.
+   */
+  private void registerBody(BodyPart part) {
+    String declared = baseType(part.getContentTypeRaw());
+    String mediaType = declared.isEmpty()
+            && part.getMediaType() == BodyMediaType.BODY_MEDIA_TYPE_HTML
+        ? HTML_MIMETYPE
+        : declared;
+    document.addAttachments(SubDocumentRef.newBuilder()
+        .setId(PART_URI_SCHEME + part.getPartId())
+        .setMediaType(mediaType)
+        .setSizeBytes(part.getText().getBytes(StandardCharsets.UTF_8).length)
+        .setKind(BODY_KIND));
+  }
+
+  /** A content type as its lowercase "type/subtype", parameters dropped. */
+  private static String baseType(String contentType) {
+    int parameters = contentType.indexOf(';');
+    String base = parameters < 0 ? contentType : contentType.substring(0, parameters);
+    return base.strip().toLowerCase(Locale.ROOT);
   }
 
   /**
@@ -623,8 +590,7 @@ public final class EmailDocumentFold {
    * fused into the item's display string.
    */
   private void attachment(Attachment attachment) {
-    Map<String, Value> partId = Map.of(KEY_PART_ID, string(attachment.getPartId()));
-    String itemRef = addListItem(attachmentsGroup(), describe(attachment), partId);
+    String itemRef = addListItem(attachmentsGroup(), describe(attachment), part(attachment));
     register(attachment, itemRef);
     if (isInlineImage(attachment)) {
       addPicture(attachment);
@@ -743,7 +709,7 @@ public final class EmailDocumentFold {
       String parentRef,
       DocItemLabel label,
       String text,
-      Map<String, Value> customFields) {
+      MimePartSource part) {
     TextItemBase.Builder base = TextItemBase.newBuilder()
         .setSelfRef(selfRef)
         .setParent(RefItem.newBuilder().setRef(parentRef))
@@ -752,8 +718,8 @@ public final class EmailDocumentFold {
         .setOrig(text)
         .setText(text)
         .addSource(source());
-    if (!customFields.isEmpty()) {
-      base.getMetaBuilder().putAllCustomFields(customFields);
+    if (part != null) {
+      base.addSource(SourceType.newBuilder().setMimePart(part));
     }
     return base;
   }
@@ -761,25 +727,25 @@ public final class EmailDocumentFold {
   private String addTitle(String parentRef, String text) {
     String ref = "#/texts/" + document.getTextsCount();
     document.addTexts(BaseTextItem.newBuilder().setTitle(TitleItem.newBuilder()
-        .setBase(textBase(ref, parentRef, DocItemLabel.DOC_ITEM_LABEL_TITLE, text, Map.of()))));
+        .setBase(textBase(ref, parentRef, DocItemLabel.DOC_ITEM_LABEL_TITLE, text, null))));
     linkChild(parentRef, ref);
     return ref;
   }
 
-  private String addText(String parentRef, String text, Map<String, Value> customFields) {
+  private String addText(String parentRef, String text, MimePartSource part) {
     String ref = "#/texts/" + document.getTextsCount();
     document.addTexts(BaseTextItem.newBuilder().setText(TextItem.newBuilder().setBase(
-        textBase(ref, parentRef, DocItemLabel.DOC_ITEM_LABEL_TEXT, text, customFields))));
+        textBase(ref, parentRef, DocItemLabel.DOC_ITEM_LABEL_TEXT, text, part))));
     linkChild(parentRef, ref);
     return ref;
   }
 
-  private String addListItem(String parentRef, String text, Map<String, Value> customFields) {
+  private String addListItem(String parentRef, String text, MimePartSource part) {
     String ref = "#/texts/" + document.getTextsCount();
     document.addTexts(BaseTextItem.newBuilder().setListItem(ListItem.newBuilder()
         .setEnumerated(false)
         .setBase(textBase(
-            ref, parentRef, DocItemLabel.DOC_ITEM_LABEL_LIST_ITEM, text, customFields))));
+            ref, parentRef, DocItemLabel.DOC_ITEM_LABEL_LIST_ITEM, text, part))));
     linkChild(parentRef, ref);
     return ref;
   }
@@ -799,23 +765,36 @@ public final class EmailDocumentFold {
         .setImage(ImageRef.newBuilder()
             .setMimetype(attachment.getContentType())
             .setUri(PART_URI_SCHEME + attachment.getPartId()))
-        .addSource(source());
-    picture.getMetaBuilder()
-        .putCustomFields(KEY_CONTENT_ID, string(attachment.getContentId()))
-        .putCustomFields(KEY_PART_ID, string(attachment.getPartId()));
+        .addSource(source())
+        .addSource(SourceType.newBuilder().setMimePart(part(attachment)));
     document.addPictures(picture);
     linkChild(BODY_REF, ref);
     return ref;
   }
 
-  private static Value string(String value) {
-    return Value.newBuilder().setStringValue(value).build();
+  /** Where in the message an attachment's item came from. */
+  private static MimePartSource part(Attachment attachment) {
+    return part(
+        attachment.getPartId(), attachment.getContentId(), attachment.getContentType());
   }
 
-  private static Value list(List<Value> values) {
-    return Value.newBuilder()
-        .setListValue(ListValue.newBuilder().addAllValues(values))
-        .build();
+  /**
+   * The typed locator an item carries in {@code source}, beside the
+   * collector that produced it: the part id the typed stream addresses the
+   * content by, and the part's content id and content type when it has
+   * them. This replaces the {@code email.part_id} and
+   * {@code email.content_id} entries items used to carry in
+   * {@code custom_fields}. An absent fact is an unset field.
+   */
+  private static MimePartSource part(String partId, String contentId, String contentType) {
+    MimePartSource.Builder part = MimePartSource.newBuilder().setPartId(partId);
+    if (!contentId.isEmpty()) {
+      part.setContentId(contentId);
+    }
+    if (!contentType.isEmpty()) {
+      part.setContentType(contentType);
+    }
+    return part.build();
   }
 
   // --- integrity ----------------------------------------------------------

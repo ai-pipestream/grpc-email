@@ -268,6 +268,60 @@ final class MsgFixtures {
     }
   }
 
+  /**
+   * A message with one attachment that has a name and a media type and no
+   * content: neither a PidTagAttachDataBinary stream nor an embedded storage.
+   * A file attached by reference is stored like this.
+   */
+  static byte[] attachmentWithoutData() throws IOException {
+    try (POIFSFileSystem container = new POIFSFileSystem();
+         ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+      DirectoryEntry root = container.getRoot();
+      unicode(root, PID_SUBJECT, SUBJECT);
+      unicode(root, PID_SENDER_NAME, SENDER_NAME);
+      unicode(root, PID_SENDER_EMAIL_ADDRESS, SENDER_EMAIL);
+      unicode(root, PID_BODY, PLAIN_BODY);
+      recipient(root, 0, TO_NAME, TO_EMAIL, RECIPIENT_TO);
+      DirectoryEntry storage =
+          root.createDirectory(String.format("__attach_version1.0_#%08X", 0));
+      unicode(storage, PID_ATTACH_FILENAME, ATTACHMENT_NAME);
+      unicode(storage, PID_ATTACH_LONG_FILENAME, ATTACHMENT_NAME);
+      unicode(storage, PID_ATTACH_MIME_TAG, "application/pdf");
+      storage.createDocument(PROPERTIES_STREAM,
+          new ByteArrayInputStream(storageProperties(List.of())));
+      root.createDocument(PROPERTIES_STREAM,
+          new ByteArrayInputStream(messageProperties(1, 1, List.of())));
+      container.writeFilesystem(out);
+      return out.toByteArray();
+    }
+  }
+
+  /** PidTagInternetCodepage: the code page PidTagHtml's bytes are in. */
+  private static final int PID_INTERNET_CODEPAGE = 0x3FDE;
+
+  /**
+   * A message whose only body is HTML stored as {@code html} bytes, with
+   * PidTagInternetCodepage set to {@code codePage} (0 to store none).
+   */
+  static byte[] htmlBytes(byte[] html, int codePage) throws IOException {
+    try (POIFSFileSystem container = new POIFSFileSystem();
+         ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+      DirectoryEntry root = container.getRoot();
+      unicode(root, PID_SUBJECT, SUBJECT);
+      unicode(root, PID_SENDER_NAME, SENDER_NAME);
+      unicode(root, PID_SENDER_EMAIL_ADDRESS, SENDER_EMAIL);
+      binary(root, PID_BODY_HTML, html);
+      recipient(root, 0, TO_NAME, TO_EMAIL, RECIPIENT_TO);
+      List<byte[]> properties = codePage == 0
+          ? List.of()
+          : List.of(longEntry(PID_INTERNET_CODEPAGE, codePage));
+      root.createDocument(PROPERTIES_STREAM,
+          new ByteArrayInputStream(messageProperties(1, 0, properties)));
+      container.writeFilesystem(out);
+      return out.toByteArray();
+    }
+  }
+
   /** A message with a subject, a sender, a recipient, and no body of any kind. */
   static byte[] noBody() throws IOException {
     try (POIFSFileSystem container = new POIFSFileSystem();

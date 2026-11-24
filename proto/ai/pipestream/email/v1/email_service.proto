@@ -260,11 +260,33 @@ message EmailInfo {
   // a .msg that did not store it.
   string conversation_topic = 13;
 
-  // PidTagConversationIndex as lowercase hex, verbatim. Outlook's native
-  // threading key: the first 22 bytes identify the conversation and each
-  // 5-byte suffix is one reply, so a prefix match orders a thread even when
-  // the message kept no transport headers. Empty for .eml.
-  string conversation_index = 14;
+  // Never set. Until 2026-11 this carried PidTagConversationIndex as
+  // lowercase hex text; binary data in a string had to be guessed back into
+  // bytes by every reader. conversation_index_raw replaces it. The
+  // declaration stays so the field number and name are never reused (a
+  // field named conversation_index_bytes would collide with this one's
+  // generated Java accessor, hence _raw).
+  string conversation_index = 14 [deprecated = true];
+
+  // Names of the envelope headers whose typed projection failed in whole or
+  // in part, each once, in the order the failures were met: "Date" when the
+  // Date header is present and will not parse (date is then unset),
+  // "Received" when the topmost Received header carries a date clause that
+  // will not parse (received_date is then unset), and an address header
+  // ("From", "To", ...) when part of its list could not be read as
+  // mailboxes and is kept verbatim in an Address. Empty when every header
+  // that was present was read. The raw values stay in `headers`; each
+  // failure also rides the trailer as a warning, so the state is
+  // STATE_PARTIAL. Always empty for .msg, whose envelope comes from MAPI
+  // properties.
+  repeated string unparsed_headers = 15;
+
+  // PidTagConversationIndex, the bytes as the store kept them. Outlook's
+  // native threading key: the first 22 bytes identify the conversation and
+  // each 5-byte suffix is one reply, so a prefix match over the bytes orders
+  // a thread even when the message kept no transport headers. Empty for
+  // .eml and for a .msg that did not store it.
+  bytes conversation_index_raw = 16;
 }
 
 // The body media types this collector emits. HTML is passed through opaque
@@ -293,7 +315,10 @@ message BodyPart {
   // Part content transcoded to UTF-8. HTML is the source markup, untouched.
   string text = 4;
   // Charset the part declared, for example "iso-8859-1". Empty when the
-  // part declared none and US-ASCII was assumed.
+  // part declared none and US-ASCII was assumed. For a MAPI body stored as
+  // bytes (the HTML body of a .msg or a TNEF container, a TNEF attBody), the
+  // name of the code page the store recorded for it, "cpN" for a code page
+  // this service cannot decode, and empty when none was recorded.
   string charset = 5;
   // For .msg, and for a body taken from a TNEF (winmail.dat) container in
   // either format, the MAPI property this body came from ("PidTagBody",
@@ -308,7 +333,10 @@ message BodyPart {
   // from RTF (source_property "PidTagRtfCompressed"), the charset of the
   // RTF's code page, in which its \'hh bytes were decoded; charset is then
   // that same charset, or "cpN" for a code page this service cannot decode.
-  // Empty for any other .msg or TNEF body, which arrives as text.
+  // A MAPI body stored as bytes is decoded by the same strict rule as an
+  // .eml part, with its recorded code page as the declared charset. Empty
+  // for a .msg or TNEF body stored as a Unicode string, which arrives as
+  // text.
   string charset_detected = 7;
   // True when charset_detected is not the charset the part declared: the
   // declared one was wrong for the bytes, unknown to this service, or
@@ -383,6 +411,13 @@ message ParseStatus {
   uint64 attachment_bytes = 5;
   // Total bytes of the uploaded message.
   uint64 message_bytes = 6;
+  // True when the message's root is an encryption envelope, so its content
+  // could not be read: an S/MIME enveloped message (application/pkcs7-mime
+  // other than signed, compressed or certificate-only) or a
+  // multipart/encrypted message (PGP/MIME). The encrypted payload is listed
+  // as an attachment, there are no body parts, and the state is
+  // STATE_PARTIAL with a warning. Only .eml is examined; false for .msg.
+  bool encrypted = 7;
 }
 
 // Request for GetServiceInfo. Empty by design.

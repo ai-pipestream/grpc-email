@@ -6,6 +6,7 @@ import ai.pipestream.email.v1.BodyMediaType;
 import ai.pipestream.email.v1.BodyPart;
 import ai.pipestream.email.v1.EmailFormat;
 import ai.pipestream.email.v1.EmailInfo;
+import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
 import jakarta.mail.internet.InternetHeaders;
 import java.io.ByteArrayInputStream;
@@ -150,7 +151,8 @@ public final class MsgParser {
     // A message filed out of a mailbox usually has no transport headers at
     // all, and without these it would have no threading whatsoever.
     info.setConversationTopic(text(chunks.getConversationTopic()));
-    info.setConversationIndex(hex(binary(chunks, MAPIProperty.CONVERSATION_INDEX)));
+    info.setConversationIndexRaw(
+        ByteString.copyFrom(binary(chunks, MAPIProperty.CONVERSATION_INDEX)));
 
     // Transport headers are the only place a .msg keeps genuine RFC 822
     // headers. MAPI properties are not dressed up as headers here: an
@@ -179,20 +181,6 @@ public final class MsgParser {
       }
     }
     return new byte[0];
-  }
-
-  /**
-   * Lowercase hex of a binary property. PidTagConversationIndex is a packed
-   * structure, not text, and its prefix ordering is what makes it useful, so
-   * it is carried verbatim rather than decoded into fields this service has
-   * no slot for.
-   */
-  private static String hex(byte[] value) {
-    StringBuilder hex = new StringBuilder(value.length * 2);
-    for (byte b : value) {
-      hex.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
-    }
-    return hex.toString();
   }
 
   private static void applyTransportHeaders(
@@ -246,7 +234,8 @@ public final class MsgParser {
   private static boolean bodies(MAPIMessage message, ParseSink sink) {
     AtomicBoolean unreadable = new AtomicBoolean();
     String plain = body("PidTagBody", message::getTextBody, sink, unreadable);
-    String html = body("PidTagHtml", message::getHtmlBody, sink, unreadable);
+    BodyPart.Builder htmlBody = BodyPart.newBuilder();
+    String html = html(message, htmlBody, sink, unreadable);
     if (!plain.isEmpty()) {
       sink.bodyPart(
           BodyPart.newBuilder()
@@ -259,7 +248,7 @@ public final class MsgParser {
     }
     if (!html.isEmpty()) {
       sink.bodyPart(
-          BodyPart.newBuilder()
+          htmlBody
               .setPartId("body:html")
               .setMediaType(BodyMediaType.BODY_MEDIA_TYPE_HTML)
               .setContentTypeRaw("text/html")
@@ -303,6 +292,47 @@ public final class MsgParser {
     RtfPlainText.describe(extracted, body, "RTF body", sink);
     sink.bodyPart(body.build());
     return true;
+  }
+
+  /**
+   * The HTML body's text, with what its decoding took written onto
+   * {@code body}.
+   *
+   * <p>Outlook stores PidTagHtml as bytes in the code page PidTagInternetCodepage
+   * names. POI's getter decodes those through a replacing decoder, and when
+   * the code page is missing or one Java does not know it reads them as
+   * windows-1252 and writes a log line: a UTF-8 body with no stored code
+   * page came out as mojibake with STATE_OK. The bytes are decoded here
+   * instead, by the same strict rule as an .eml body, so a body that did
+   * not fit its code page is flagged on the BodyPart and warned about. An
+   * HTML body stored as a string property is already text and is taken as
+   * POI reads it.
+   */
+  private static String html(
+      MAPIMessage message, BodyPart.Builder body, ParseSink sink, AtomicBoolean unreadable) {
+    Chunks chunks = message.getMainChunks();
+    ByteChunk binary = chunks.getHtmlBodyChunkBinary();
+    if (binary == null || binary.getValue() == null) {
+      return body("PidTagHtml", message::getHtmlBody, sink, unreadable);
+    }
+    String declared = BodyText.codePageName(internetCodePage(chunks));
+    BodyText.Decoded decoded = BodyText.decode(binary.getValue(), declared, "body:html", sink);
+    body.setCharset(declared)
+        .setCharsetDetected(decoded.charsetDetected())
+        .setCharsetFallback(decoded.fallback())
+        .setUndecodableSequences(decoded.undecodableSequences());
+    return decoded.text();
+  }
+
+  /** PidTagInternetCodepage, or 0 when the message stored none. */
+  private static int internetCodePage(Chunks chunks) {
+    Map<MAPIProperty, List<PropertyValue>> properties = chunks.getProperties();
+    List<PropertyValue> values =
+        properties == null ? null : properties.get(MAPIProperty.INTERNET_CPID);
+    if (values == null || values.isEmpty()) {
+      return 0;
+    }
+    return values.getFirst().getValue() instanceof Number number ? number.intValue() : 0;
   }
 
   /**
@@ -382,6 +412,12 @@ public final class MsgParser {
     }
     DirectoryChunk directory = chunk.getAttachmentDirectory();
     if (directory == null || directory.getDirectory() == null) {
+      // Neither storage form is there: a file attached by reference, or a
+      // data stream that was lost. The attachment is still listed, and the
+      // size 0 beside its name must not read as "an empty file".
+      sink.warn("attachment " + index + " carries no data in the message (neither"
+          + " PidTagAttachDataBinary nor an embedded storage; it may be attached by reference);"
+          + " listed without its bytes");
       return new byte[0];
     }
     try (POIFSFileSystem nested = new POIFSFileSystem();

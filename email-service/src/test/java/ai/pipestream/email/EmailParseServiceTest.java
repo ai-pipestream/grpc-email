@@ -477,6 +477,44 @@ class EmailParseServiceTest {
         .anyMatch(warning -> warning.contains("no charset"));
   }
 
+  @Test
+  @DisplayName("a Date header that will not parse makes the parse PARTIAL and is named on EmailInfo")
+  void unparseableDateIsPartialAndNamed() throws Exception {
+    byte[] message = ("From: cron@example.com\r\nTo: ops@example.com\r\n"
+        + "Date: 2023-11-14T22:13:20Z\r\nSubject: nightly\r\n\r\nbody\r\n")
+        .getBytes(StandardCharsets.US_ASCII);
+
+    Result result = parseWhole(message, "eml-bad-date");
+    EmailInfo info = result.info();
+    assertThat(info.hasDate()).isFalse();
+    assertThat(info.getUnparsedHeadersList()).containsExactly("Date");
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
+    assertThat(result.status().getWarningsList())
+        .anyMatch(warning -> warning.contains("Date") && warning.contains("could not be parsed"));
+  }
+
+  @Test
+  @DisplayName("an S/MIME encrypted message is PARTIAL and flagged encrypted on the trailer")
+  void encryptedMessageIsFlaggedOnTheTrailer() throws Exception {
+    Result result = parseWhole(EmlFixtures.smimeEnveloped(), "eml-smime");
+
+    assertThat(result.bodies()).isEmpty();
+    assertThat(result.status().getEncrypted()).isTrue();
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
+    assertThat(result.status().getAttachments()).isEqualTo(1);
+    assertThat(result.status().getWarningsList())
+        .anyMatch(warning -> warning.contains("encrypted"));
+  }
+
+  @Test
+  @DisplayName("a readable message is not flagged encrypted")
+  void readableMessageIsNotFlaggedEncrypted() throws Exception {
+    Result result = parseWhole(EmlFixtures.plainText(), "eml-plain");
+
+    assertThat(result.status().getEncrypted()).isFalse();
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_OK);
+  }
+
   // --- damaged transfer encodings: one bad part never fails the message ----
 
   @Test
@@ -904,18 +942,17 @@ class EmailParseServiceTest {
     assertThat(info.getConversationTopic())
         .as("PidTagConversationTopic is the normalized thread subject")
         .isEqualTo(MsgFixtures.CONVERSATION_TOPIC);
-    assertThat(info.getConversationIndex())
-        .as("PidTagConversationIndex rides as lowercase hex, verbatim")
-        .isEqualTo(hex(MsgFixtures.CONVERSATION_INDEX));
+    assertThat(info.getConversationIndexRaw().toByteArray())
+        .as("PidTagConversationIndex rides as the bytes the store kept")
+        .isEqualTo(MsgFixtures.CONVERSATION_INDEX);
+    assertThat(deprecatedHexIndex(info))
+        .as("the retired hex field is never set")
+        .isEmpty();
   }
 
-  /** The expected hex of a fixture's binary property, computed independently. */
-  private static String hex(byte[] value) {
-    StringBuilder text = new StringBuilder();
-    for (byte b : value) {
-      text.append(String.format("%02x", b));
-    }
-    return text.toString();
+  @SuppressWarnings("deprecation")
+  private static String deprecatedHexIndex(EmailInfo info) {
+    return info.getConversationIndex();
   }
 
   @Test

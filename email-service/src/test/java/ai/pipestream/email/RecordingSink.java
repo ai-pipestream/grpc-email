@@ -20,6 +20,7 @@ final class RecordingSink implements ParseSink {
   final List<BodyPart> bodies = new ArrayList<>();
   final List<Attachment> attachments = new ArrayList<>();
   final List<String> warnings = new ArrayList<>();
+  boolean encrypted;
 
   /** Attachments listed with their bytes, up to 1 MiB each. */
   static final ParseOptions OPTIONS =
@@ -57,5 +58,10 @@ final class RecordingSink implements ParseSink {
   @Override
   public void warn(String warning) {
     warnings.add(warning);
+  }
+
+  @Override
+  public void encrypted() {
+    encrypted = true;
   }
 }

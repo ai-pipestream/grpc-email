@@ -273,6 +273,7 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
     private int bodyParts;
     private int attachments;
     private long attachmentBytes;
+    private boolean encrypted;
 
     private Sink(
         StreamObserver<ParseEmailResponse> responses,
@@ -330,6 +331,11 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
     }
 
     @Override
+    public synchronized void encrypted() {
+      encrypted = true;
+    }
+
+    @Override
     public void checkpoint() {
       if (cancelled.getAsBoolean()) {
         throw new ParseCancelledException();
@@ -358,7 +364,8 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
           .setBodyParts(bodyParts)
           .setAttachments(attachments)
           .setAttachmentBytes(attachmentBytes)
-          .setMessageBytes(message.length);
+          .setMessageBytes(message.length)
+          .setEncrypted(encrypted);
       if (suppressedWarnings > 0) {
         status.addWarnings(suppressedWarnings + " further warning(s) suppressed; only the first "
             + MAX_WARNINGS + " are listed");
@@ -740,7 +747,8 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
       sink.info(HeaderProjection.project(
           HeaderProjection.read(buffer.array(), headerLength),
           options.documentId(),
-          EmailFormat.EMAIL_FORMAT_EML));
+          EmailFormat.EMAIL_FORMAT_EML,
+          sink::warn));
     }
 
     @Override

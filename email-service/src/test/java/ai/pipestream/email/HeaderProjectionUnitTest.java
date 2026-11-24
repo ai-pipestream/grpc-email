@@ -13,6 +13,7 @@ import ai.pipestream.email.v1.EmailInfo;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -27,9 +28,131 @@ import org.junit.jupiter.api.Test;
 class HeaderProjectionUnitTest {
 
   private static EmailInfo project(String block) {
+    return project(block, new ArrayList<>());
+  }
+
+  private static EmailInfo project(String block, List<String> warnings) {
     byte[] bytes = block.getBytes(StandardCharsets.UTF_8);
     return HeaderProjection.project(
-        HeaderProjection.read(bytes, bytes.length), "doc-1", EmailFormat.EMAIL_FORMAT_EML);
+        HeaderProjection.read(bytes, bytes.length), "doc-1", EmailFormat.EMAIL_FORMAT_EML,
+        warnings::add);
+  }
+
+  // --- what the projection could not read is said, not just left out --------
+
+  @Test
+  void unparseableDate_isWarnedAbout_andNamedOnTheEnvelope() {
+    List<String> warnings = new ArrayList<>();
+    EmailInfo info = project("From: a@example.com\r\nDate: 2023-11-14T22:13:20Z\r\n\r\n", warnings);
+
+    assertThat(info.hasDate()).isFalse();
+    assertThat(info.getUnparsedHeadersList()).containsExactly("Date");
+    assertThat(warnings).hasSize(1);
+    assertThat(warnings.getFirst()).contains("Date").contains("2023-11-14T22:13:20Z");
+  }
+
+  @Test
+  void absentDate_isNotAProblem() {
+    List<String> warnings = new ArrayList<>();
+    EmailInfo info = project("From: a@example.com\r\nSubject: no date\r\n\r\n", warnings);
+
+    assertThat(info.hasDate()).isFalse();
+    assertThat(info.getUnparsedHeadersList()).isEmpty();
+    assertThat(warnings).isEmpty();
+  }
+
+  @Test
+  void blankDate_isNotAProblem() {
+    List<String> warnings = new ArrayList<>();
+    EmailInfo info = project("From: a@example.com\r\nDate:   \r\n\r\n", warnings);
+
+    assertThat(info.getUnparsedHeadersList()).isEmpty();
+    assertThat(warnings).isEmpty();
+  }
+
+  @Test
+  void unparseableReceivedDate_isWarnedAbout_andNamedOnTheEnvelope() {
+    List<String> warnings = new ArrayList<>();
+    EmailInfo info = project(
+        "Received: from a.example by b.example; sometime last week\r\n"
+            + "From: a@example.com\r\nDate: Tue, 14 Nov 2023 22:13:20 +0000\r\n\r\n",
+        warnings);
+
+    assertThat(info.hasDate()).isTrue();
+    assertThat(info.hasReceivedDate()).isFalse();
+    assertThat(info.getUnparsedHeadersList()).containsExactly("Received");
+    assertThat(warnings).hasSize(1);
+    assertThat(warnings.getFirst()).contains("Received").contains("sometime last week");
+  }
+
+  @Test
+  void receivedHeaderWithNoDateClause_isNotAProblem() {
+    List<String> warnings = new ArrayList<>();
+    EmailInfo info = project(
+        "Received: from a.example by b.example\r\nFrom: a@example.com\r\n\r\n", warnings);
+
+    assertThat(info.hasReceivedDate()).isFalse();
+    assertThat(info.getUnparsedHeadersList()).isEmpty();
+    assertThat(warnings).isEmpty();
+  }
+
+  @Test
+  void mailboxKeptVerbatim_isWarnedAbout_andNamedOnTheEnvelope() {
+    List<String> warnings = new ArrayList<>();
+    EmailInfo info = project(
+        "From: a@example.com\r\nTo: jane@y.org, John Doe <john@x.org\r\n\r\n", warnings);
+
+    assertThat(info.getAddressesList())
+        .filteredOn(address -> address.getRole() == AddressRole.ADDRESS_ROLE_TO)
+        .extracting(Address::getAddress)
+        .as("the readable mailbox is typed; the rest is kept as written")
+        .containsExactly("jane@y.org", "John Doe <john@x.org");
+    assertThat(info.getUnparsedHeadersList()).containsExactly("To");
+    assertThat(warnings).hasSize(1);
+    assertThat(warnings.getFirst()).contains("To").contains("verbatim");
+  }
+
+  @Test
+  void eachHeaderIsNamedOnce_inTheOrderItFailed() {
+    List<String> warnings = new ArrayList<>();
+    EmailInfo info = project(
+        "From: <<<\r\nTo: (never closed\r\nTo: [also never\r\nDate: not a date\r\n\r\n",
+        warnings);
+
+    assertThat(info.getUnparsedHeadersList()).containsExactly("From", "To", "Date");
+    assertThat(warnings).hasSize(4);
+  }
+
+  @Test
+  void strayCloserIsStillReadByTheLenientParser_soNothingIsReported() {
+    // The review's example of a rejected list. Jakarta Mail's header parse
+    // does not reject it: both mailboxes come back typed, so there is
+    // nothing to warn about. This pins that reading against an upgrade.
+    List<String> warnings = new ArrayList<>();
+    EmailInfo info = project(
+        "From: a@example.com\r\nTo: John Doe> <john@x.org>, jane@y.org\r\n\r\n", warnings);
+
+    assertThat(info.getAddressesList())
+        .filteredOn(address -> address.getRole() == AddressRole.ADDRESS_ROLE_TO)
+        .extracting(Address::getAddress)
+        .containsExactly("john@x.org", "jane@y.org");
+    assertThat(info.getUnparsedHeadersList()).isEmpty();
+    assertThat(warnings).isEmpty();
+  }
+
+  @Test
+  void cleanEnvelope_reportsNothing() {
+    List<String> warnings = new ArrayList<>();
+    EmailInfo info = project(
+        "Received: from a.example by b.example; Tue, 14 Nov 2023 22:13:20 +0000 (UTC)\r\n"
+            + "From: Clerk <clerk@example.gov>\r\nTo: ada@example.com\r\n"
+            + "Date: Tue, 14 Nov 2023 22:13:20 +0000\r\n\r\n",
+        warnings);
+
+    assertThat(info.hasDate()).isTrue();
+    assertThat(info.hasReceivedDate()).isTrue();
+    assertThat(info.getUnparsedHeadersList()).isEmpty();
+    assertThat(warnings).isEmpty();
   }
 
   @Test
