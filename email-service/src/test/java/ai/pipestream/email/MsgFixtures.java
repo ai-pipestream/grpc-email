@@ -234,6 +234,56 @@ final class MsgFixtures {
     }
   }
 
+  /**
+   * A message whose only body is a PidTagRtfCompressed stream that is not
+   * compressed RTF at all: the sizes are there, the signature is not. The
+   * body exists and cannot be read, which is not the same as having none.
+   */
+  static byte[] damagedRtfOnly() throws IOException {
+    return damagedRtf("");
+  }
+
+  /**
+   * The same damaged RTF stream beside a plain body ({@code plain} empty for
+   * none). With a plain body present the RTF is never needed.
+   */
+  static byte[] damagedRtf(String plain) throws IOException {
+    try (POIFSFileSystem container = new POIFSFileSystem();
+         ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+      DirectoryEntry root = container.getRoot();
+      unicode(root, PID_SUBJECT, "Damaged rich text");
+      unicode(root, PID_SENDER_NAME, SENDER_NAME);
+      unicode(root, PID_SENDER_EMAIL_ADDRESS, SENDER_EMAIL);
+      if (!plain.isEmpty()) {
+        unicode(root, PID_BODY, plain);
+      }
+      byte[] stream = uncompressedRtfStream("{\\rtf1 lost}");
+      stream[8] = 'X';
+      binary(root, PID_RTF_COMPRESSED, stream);
+      recipient(root, 0, TO_NAME, TO_EMAIL, RECIPIENT_TO);
+      root.createDocument(PROPERTIES_STREAM,
+          new ByteArrayInputStream(messageProperties(1, 0, List.of())));
+      container.writeFilesystem(out);
+      return out.toByteArray();
+    }
+  }
+
+  /** A message with a subject, a sender, a recipient, and no body of any kind. */
+  static byte[] noBody() throws IOException {
+    try (POIFSFileSystem container = new POIFSFileSystem();
+         ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+      DirectoryEntry root = container.getRoot();
+      unicode(root, PID_SUBJECT, SUBJECT);
+      unicode(root, PID_SENDER_NAME, SENDER_NAME);
+      unicode(root, PID_SENDER_EMAIL_ADDRESS, SENDER_EMAIL);
+      recipient(root, 0, TO_NAME, TO_EMAIL, RECIPIENT_TO);
+      root.createDocument(PROPERTIES_STREAM,
+          new ByteArrayInputStream(messageProperties(1, 0, List.of())));
+      container.writeFilesystem(out);
+      return out.toByteArray();
+    }
+  }
+
   /** Party property ids, for the fixtures that say how a party is stored. */
   static final int PID_SENT_REPRESENTING_EMAIL_ADDRESS = 0x0065;
   static final int PID_SENDER_ADDRESS_TYPE = 0x0C1E;
