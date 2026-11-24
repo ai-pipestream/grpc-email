@@ -4,8 +4,7 @@ gRPC collector for RFC 822 .eml and Outlook .msg, projecting into the gRParse Do
 
 A standalone gRPC server that turns email bytes into typed events: envelope,
 body parts, attachments, status. One JVM: Jakarta Mail for `.eml`, Apache POI
-HSMF for `.msg`. It is not PipeStream core and there is no Python in the
-serving path.
+HSMF for `.msg`. There is no Python in the serving path.
 
 Two properties define the service:
 
