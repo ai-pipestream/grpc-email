@@ -29,6 +29,13 @@ public interface ParseSink {
   void warn(String warning);
 
   /**
+   * Records that the message's root is an encryption envelope, so its
+   * content was not read. Rides the trailer as {@code ParseStatus.encrypted}.
+   * A parser that calls this also warns, in words, about what it found.
+   */
+  default void encrypted() {}
+
+  /**
    * Throws {@link ParseCancelledException} once the client is gone, so a
    * parser stops between parts rather than decoding the rest for nobody.
    * Parsers call it before each part and attachment they turn to.

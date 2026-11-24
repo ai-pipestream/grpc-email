@@ -299,15 +299,12 @@ class EmailDocumentWireTest {
   void msgConversationIndexIsBytes() throws Exception {
     List<ParseEmailResponse> events = parse(MsgFixtures.conversationOnly(), true);
     EmailMeta email = onlyDocument(events).getEmail();
-    String hex = events.get(0).getEmailInfo().getConversationIndex();
-
-    assertThat(hex).as("the typed stream still spells it in hex").isNotEmpty();
+    assertThat(events.get(0).getEmailInfo().getConversationIndexRaw().toByteArray())
+        .as("the typed stream carries the same bytes; nothing is text on the way")
+        .isEqualTo(MsgFixtures.CONVERSATION_INDEX);
     assertThat(email.getConversationIndex().toByteArray())
         .as("the document carries the packed structure Outlook wrote, byte for byte")
         .isEqualTo(MsgFixtures.CONVERSATION_INDEX);
-    assertThat(email.getConversationIndex().size())
-        .as("hex text would have been twice as long")
-        .isEqualTo(hex.length() / 2);
     assertThat(email.getConversationTopic()).isEqualTo(MsgFixtures.CONVERSATION_TOPIC);
     assertThat(email.hasMessageId())
         .as("a filed message with no transport headers threads on these two alone")

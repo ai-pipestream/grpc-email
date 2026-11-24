@@ -125,6 +125,52 @@ final class EmlFixtures {
         + "aGVsbG8gd29ybGQ\r\n").getBytes(StandardCharsets.US_ASCII);
   }
 
+  /**
+   * An S/MIME encrypted message: the whole content is one CMS enveloped-data
+   * object. The payload here is not real CMS; nothing in this service opens
+   * it, which is the point.
+   */
+  static byte[] smimeEnveloped() {
+    return smime("enveloped-data");
+  }
+
+  /** An S/MIME object of the given smime-type ("" for a part that names none). */
+  static byte[] smime(String smimeType) {
+    return (handWrittenHeaders("sealed")
+        + "Content-Type: application/pkcs7-mime; name=\"smime.p7m\""
+        + (smimeType.isEmpty() ? "" : "; smime-type=" + smimeType) + "\r\n"
+        + "Content-Disposition: attachment; filename=\"smime.p7m\"\r\n"
+        + "Content-Transfer-Encoding: base64\r\n"
+        + "\r\n"
+        + "MIAGCSqGSIb3DQEHA6CAMIACAQAxggE=\r\n").getBytes(StandardCharsets.US_ASCII);
+  }
+
+  /** A PGP/MIME encrypted message, RFC 3156: a control part and the ciphertext. */
+  static byte[] pgpEncrypted() {
+    return (handWrittenHeaders("sealed with pgp")
+        + "Content-Type: multipart/encrypted; protocol=\"application/pgp-encrypted\";"
+        + " boundary=\"sealed\"\r\n"
+        + "\r\n"
+        + "--sealed\r\n"
+        + "Content-Type: application/pgp-encrypted\r\n"
+        + "\r\n"
+        + "Version: 1\r\n"
+        + "--sealed\r\n"
+        + "Content-Type: application/octet-stream; name=\"encrypted.asc\"\r\n"
+        + "\r\n"
+        + "-----BEGIN PGP MESSAGE-----\r\n\r\nhQEMA5vJ\r\n-----END PGP MESSAGE-----\r\n"
+        + "--sealed--\r\n").getBytes(StandardCharsets.US_ASCII);
+  }
+
+  /** A message whose only part is a calendar invitation: text, but not a body here. */
+  static byte[] calendarOnly() {
+    return (handWrittenHeaders("standup")
+        + "Content-Type: text/calendar; method=REQUEST; charset=utf-8\r\n"
+        + "\r\n"
+        + "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n")
+        .getBytes(StandardCharsets.US_ASCII);
+  }
+
   /** A body declaring a transfer encoding no decoder knows. */
   static byte[] unknownTransferEncoding() {
     return (handWrittenHeaders("weird encoding")
