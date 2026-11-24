@@ -133,9 +133,13 @@ with a content id) becomes a `PictureItem` whose `ImageRef.uri` is
 never embedded: a Document is one gRPC message, and attachment payloads
 belong on `Attachment.data`.
 
-Not mapped, deliberately: HTML bodies (the HTML collector parses those, and
-its items merge into this fragment downstream), the lossless header list, and
-provenance. Email has no pages, so `prov` stays empty rather than carrying
+Not parsed, deliberately: HTML bodies (the HTML collector parses those, and
+its items merge into this fragment downstream). The Document still names
+each one: a `SubDocumentRef` in `Document.attachments` with `kind` `body`,
+id `part:<part_id>` (the `BodyPart` event with that part id), media type
+`text/html` and the size of its text, so a client of the Document alone can
+tell that an HTML-only message has a body it must send to another parser.
+Not mapped at all: the lossless header list, and provenance. Email has no pages, so `prov` stays empty rather than carrying
 an invented page number.
 
 ## Formats
