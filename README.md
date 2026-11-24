@@ -120,11 +120,14 @@ becomes `Document.email`, the schema's own typed slot: every mailbox an
 `EmailParty` with its display name and its addr-spec apart, every threading id
 its own repeated element, the conversation index the packed bytes it is, and
 the sent instant a `Timestamp` beside `sent_raw`, the Date header's own
-spelling. Nothing that has a typed home is also written into a map; the two
-roles the schema does not model (`Reply-To`, `Sender`) stay in the body group's
-`meta.custom_fields`, still split into `name` and `address`. Each `text/plain` part
-becomes one `TextItem` per blank-line-separated paragraph, tagged with its
-`email.part_id`. Listed attachments become a `GROUP_LABEL_LIST` group named
+spelling. `Reply-To` and `Sender` are parties too (`reply_to`, `sender`), the
+delivery time is `received` beside `received_raw`, the root part's declared
+type is `content_type`, and an Exchange or X.400 address rides on its party as
+`native_address` with its `address_type`. The fold writes nothing into
+`custom_fields` or `extra`: every fact has a typed field. Each `text/plain` part
+becomes one `TextItem` per blank-line-separated paragraph, and every item that
+came from a part names it in a second `source` entry, a typed `MimePartSource`
+(`part_id`, `content_id`, `content_type`). Listed attachments become a `GROUP_LABEL_LIST` group named
 `attachments`, one line per attachment. An inline image (`inline`, `image/*`,
 with a content id) becomes a `PictureItem` whose `ImageRef.uri` is
 **`part:<part_id>`**, a pointer into the typed stream you are already reading

@@ -209,12 +209,30 @@ class EmailDocumentWireTest {
         .isEqualTo(inlineImages);
 
     assertThat(document.getTextsList()).allSatisfy(item -> {
-      assertThat(base(item).getSourceList()).hasSize(1);
+      assertThat(base(item).getSourceList())
+          .as("the collector, then the MIME part for everything but the title")
+          .hasSize(item.hasTitle() ? 1 : 2);
       assertThat(base(item).getSource(0).getCollector().getCollector()).isEqualTo("email");
       assertThat(base(item).getSource(0).getCollector().getModel()).isEqualTo(model);
       assertThat(base(item).getSource(0).getCollector().getVersion())
           .isEqualTo(EmailParseServiceImpl.SERVICE_VERSION);
     });
+
+    List<String> partIds = new java.util.ArrayList<>();
+    bodies(events).stream()
+        .filter(part -> part.getMediaType() == BodyMediaType.BODY_MEDIA_TYPE_PLAIN)
+        .forEach(part -> partIds.add(part.getPartId()));
+    listed.forEach(attachment -> partIds.add(attachment.getPartId()));
+    assertThat(document.getTextsList().stream()
+        .filter(item -> !item.hasTitle())
+        .map(item -> base(item).getSource(1).getMimePart().getPartId())
+        .toList())
+        .as("every item names the event it was folded from, by that event's own part id")
+        .isEqualTo(partIds);
+    assertThat(document.getPicturesList().stream()
+        .map(picture -> "part:" + picture.getSource(1).getMimePart().getPartId())
+        .toList())
+        .isEqualTo(inlineImages);
   }
 
   // --- tests --------------------------------------------------------------
@@ -295,6 +313,30 @@ class EmailDocumentWireTest {
   }
 
   @Test
+  @DisplayName("the .eml root content type reaches the document with its parameters")
+  void emlRootContentTypeIsTyped() throws Exception {
+    List<ParseEmailResponse> events = parse(EmlFixtures.multipartWithAttachments(), true);
+    EmailMeta email = onlyDocument(events).getEmail();
+
+    assertThat(email.getContentType())
+        .isEqualTo(events.get(0).getEmailInfo().getContentType())
+        .startsWith("multipart/");
+  }
+
+  @Test
+  @DisplayName("an Outlook delivery time reaches the document as an instant with its raw twin")
+  void msgReceivedIsATimestampWithTheHeaderSpelling() throws Exception {
+    List<ParseEmailResponse> events = parse(MsgFixtures.full(), true);
+    EmailMeta email = onlyDocument(events).getEmail();
+
+    assertThat(events.get(0).getEmailInfo().hasReceivedDate()).isTrue();
+    assertThat(email.getReceived()).isEqualTo(events.get(0).getEmailInfo().getReceivedDate());
+    assertThat(email.getReceivedRaw())
+        .as("the topmost Received header's date clause, exactly as the hop wrote it")
+        .isEqualTo("Tue, 14 Nov 2023 22:13:20 +0000");
+  }
+
+  @Test
   @DisplayName("an Outlook conversation index reaches the document as bytes")
   void msgConversationIndexIsBytes() throws Exception {
     List<ParseEmailResponse> events = parse(MsgFixtures.conversationOnly(), true);
@@ -316,12 +358,14 @@ class EmailDocumentWireTest {
   void theEnvelopeIsNotAlsoWrittenIntoTheMaps() throws Exception {
     Document document = onlyDocument(parse(EmlFixtures.multipartWithAttachments(), true));
 
-    assertThat(document.getSourceMeta().getExtraMap().keySet())
-        .as("only the caller's advisory claim is open vocabulary now")
-        .containsExactly("email.declared_content_type");
-    assertThat(document.getBody().getMeta().getCustomFieldsMap())
-        .doesNotContainKeys("email.from", "email.to", "email.cc", "email.bcc", "email.date",
-            "email.message_id", "email.in_reply_to", "email.references");
+    assertThat(document.getSourceMeta().getExtraMap())
+        .as("the caller's advisory claim has a typed home too; nothing is open vocabulary")
+        .isEmpty();
+    assertThat(document.getBody().getMeta().getCustomFieldsMap()).isEmpty();
+    assertThat(document.getTextsList())
+        .allSatisfy(item -> assertThat(base(item).getMeta().getCustomFieldsMap()).isEmpty());
+    assertThat(document.getPicturesList())
+        .allSatisfy(picture -> assertThat(picture.getMeta().getCustomFieldsMap()).isEmpty());
   }
 
   @Test
@@ -339,7 +383,8 @@ class EmailDocumentWireTest {
     assertThat(document.getOrigin().getMimetype())
         .as("the bytes decide the container type, not the caller's claim")
         .isEqualTo("message/rfc822");
-    assertThat(document.getSourceMeta().getExtraMap().get("email.declared_content_type"))
+    assertThat(document.getOrigin().getDeclaredMimetype())
+        .as("the caller's claim rides beside the sniffed type, in its own field")
         .isEqualTo(DECLARED_CONTENT_TYPE);
     assertThat(document.getOrigin().getBinaryHash())
         .as("the whole message is buffered anyway; the integrity key is free")

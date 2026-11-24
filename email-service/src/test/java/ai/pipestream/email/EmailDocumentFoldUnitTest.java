@@ -14,6 +14,7 @@ import ai.pipestream.document.v1.EmailMeta;
 import ai.pipestream.document.v1.EmailParty;
 import ai.pipestream.document.v1.GroupItem;
 import ai.pipestream.document.v1.GroupLabel;
+import ai.pipestream.document.v1.MimePartSource;
 import ai.pipestream.document.v1.PictureItem;
 import ai.pipestream.document.v1.RefItem;
 import ai.pipestream.document.v1.SourceType;
@@ -34,14 +35,10 @@ import ai.pipestream.email.v1.Header;
 import ai.pipestream.email.v1.ParseEmailResponse;
 import ai.pipestream.email.v1.ParseStatus;
 import com.google.protobuf.ByteString;
-import com.google.protobuf.Struct;
 import com.google.protobuf.Timestamp;
-import com.google.protobuf.Value;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.List;
-import java.util.Map;
-import org.assertj.core.groups.Tuple;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -173,24 +170,24 @@ class EmailDocumentFoldUnitTest {
     };
   }
 
-  private static Map<String, Value> bodyFields(Document document) {
-    return document.getBody().getMeta().getCustomFieldsMap();
+  /** The MIME part locator of an item: the second source entry, after the collector. */
+  private static MimePartSource mimePart(List<SourceType> sources) {
+    assertThat(sources).hasSize(2);
+    assertThat(sources.get(0).hasCollector()).isTrue();
+    assertThat(sources.get(1).hasMimePart()).isTrue();
+    return sources.get(1).getMimePart();
   }
 
-  /**
-   * The mailboxes in an open-vocabulary address value, as (name, address)
-   * pairs. A field the mailbox did not carry reads back as null rather than
-   * as an empty string, which is the whole point of leaving it out.
-   */
-  private static List<Tuple> parties(Value value) {
-    return value.getListValue().getValuesList().stream()
-        .map(Value::getStructValue)
-        .map(party -> tuple(field(party, "name"), field(party, "address")))
-        .toList();
-  }
-
-  private static String field(Struct party, String name) {
-    return party.containsFields(name) ? party.getFieldsOrThrow(name).getStringValue() : null;
+  /** Every open-vocabulary map in the document, which the fold must leave empty. */
+  private static void assertNoOpenVocabulary(Document document) {
+    assertThat(document.getBody().getMeta().getCustomFieldsMap()).isEmpty();
+    assertThat(document.getSourceMeta().getExtraMap()).isEmpty();
+    assertThat(document.getTextsList())
+        .allSatisfy(item -> assertThat(base(item).getMeta().getCustomFieldsMap()).isEmpty());
+    assertThat(document.getPicturesList())
+        .allSatisfy(picture -> assertThat(picture.getMeta().getCustomFieldsMap()).isEmpty());
+    assertThat(document.getGroupsList())
+        .allSatisfy(group -> assertThat(group.getMeta().getCustomFieldsMap()).isEmpty());
   }
 
   private static List<String> childRefs(GroupItem group) {
@@ -349,36 +346,97 @@ class EmailDocumentFoldUnitTest {
   }
 
   @Test
-  @DisplayName("the two roles the schema does not model stay structured in the open map")
-  void replyToAndSenderStayInTheOpenVocabularyMapAsStructs() {
-    Document document = foldFullStream();
-    Map<String, Value> fields = bodyFields(document);
+  @DisplayName("Reply-To and Sender are typed parties, not structs in a map")
+  void replyToAndSenderAreTypedParties() {
+    EmailMeta email = foldFullStream().getEmail();
 
-    assertThat(parties(fields.get("email.reply_to")))
+    assertThat(email.getReplyToList())
+        .extracting(EmailParty::getName, EmailParty::getAddress)
         .containsExactly(tuple("Chambers", "chambers@example.gov"));
-    assertThat(parties(fields.get("email.sender")))
-        .as("a bare address is a struct with an address and no name, not a display string")
-        .containsExactly(tuple(null, "mailer@example.gov"));
-    assertThat(fields.get("email.received_date").getStringValue())
-        .isEqualTo("2023-11-14T22:14:20Z");
-    assertThat(fields.get("email.content_type").getStringValue())
-        .isEqualTo("multipart/mixed; boundary=abc");
+    assertThat(email.getSenderList())
+        .extracting(EmailParty::getName, EmailParty::getAddress)
+        .containsExactly(tuple("", "mailer@example.gov"));
+    assertThat(email.getSender(0).hasName())
+        .as("a bare address has no display name, and none is invented")
+        .isFalse();
   }
 
   @Test
-  @DisplayName("nothing with a typed home is duplicated into a map")
-  void factsWithATypedHomeLeaveTheMapsAlone() {
-    Document document = foldFullStream();
+  @DisplayName("the delivery instant is a Timestamp, with the header's own spelling beside it")
+  void theReceivedInstantIsTypedWithItsRawTwin() {
+    EmailDocumentFold fold = new EmailDocumentFold(VERSION);
+    fold.consume(event(envelope().toBuilder()
+        .addHeaders(header("Received",
+            "from mx.example.gov by mail.example.com; Tue, 14 Nov 2023 22:14:20 +0000"))
+        .build()));
+    EmailMeta email = fold.take().getEmail();
 
-    assertThat(bodyFields(document))
-        .as("from, to, cc, bcc, the sent instant and the threading ids all live on email now")
-        .doesNotContainKeys("email.from", "email.to", "email.cc", "email.bcc", "email.date",
-            "email.message_id", "email.in_reply_to", "email.references",
-            "email.conversation_topic", "email.conversation_index");
-    assertThat(document.getSourceMeta().getExtraMap())
-        .doesNotContainKeys("email.from", "email.to", "email.cc", "email.bcc",
-            "email.message_id", "email.in_reply_to", "email.references",
-            "email.conversation_topic", "email.conversation_index");
+    assertThat(email.getReceived())
+        .as("an instant, not an RFC 3339 rendering of one in a string value")
+        .isEqualTo(Timestamp.newBuilder().setSeconds(1_700_000_060L).build());
+    assertThat(email.getReceivedRaw()).isEqualTo("Tue, 14 Nov 2023 22:14:20 +0000");
+  }
+
+  @Test
+  @DisplayName("a delivery time read from a property has no header spelling to keep")
+  void aReceivedInstantFromAPropertyHasNoRawTwin() {
+    EmailMeta email = foldFullStream().getEmail();
+
+    assertThat(email.getReceived())
+        .isEqualTo(Timestamp.newBuilder().setSeconds(1_700_000_060L).build());
+    assertThat(email.hasReceivedRaw()).isFalse();
+  }
+
+  @Test
+  @DisplayName("a message with no delivery time has no received instant, not the epoch")
+  void anAbsentReceivedDateStaysAbsent() {
+    EmailDocumentFold fold = new EmailDocumentFold(VERSION);
+    fold.consume(event(envelope().toBuilder().clearReceivedDate().build()));
+    EmailMeta email = fold.take().getEmail();
+
+    assertThat(email.hasReceived()).isFalse();
+    assertThat(email.hasReceivedRaw()).isFalse();
+  }
+
+  @Test
+  @DisplayName("the root Content-Type keeps its parameters in its own field")
+  void theRootContentTypeIsTyped() {
+    EmailMeta email = foldFullStream().getEmail();
+
+    assertThat(email.getContentType()).isEqualTo("multipart/mixed; boundary=abc");
+  }
+
+  @Test
+  @DisplayName("an Exchange address and its type ride on the party, beside an empty SMTP address")
+  void aNativeAddressAndItsTypeReachTheParty() {
+    EmailDocumentFold fold = new EmailDocumentFold(VERSION);
+    fold.consume(event(EmailInfo.newBuilder()
+        .setDocumentId("doc-ex")
+        .setFormat(EmailFormat.EMAIL_FORMAT_MSG)
+        .addAddresses(Address.newBuilder()
+            .setRole(AddressRole.ADDRESS_ROLE_FROM)
+            .setName("Ada Counsel")
+            .setNativeAddress("/O=EXAMPLE/OU=FIRST/CN=RECIPIENTS/CN=ADA")
+            .setAddressType("EX"))
+        .addAddresses(address(AddressRole.ADDRESS_ROLE_TO, "", "bob@example.com"))
+        .build()));
+    EmailMeta email = fold.take().getEmail();
+
+    assertThat(email.getFrom(0).getName()).isEqualTo("Ada Counsel");
+    assertThat(email.getFrom(0).getAddress())
+        .as("a directory name is not an SMTP address and is never moved into that field")
+        .isEmpty();
+    assertThat(email.getFrom(0).getNativeAddress())
+        .isEqualTo("/O=EXAMPLE/OU=FIRST/CN=RECIPIENTS/CN=ADA");
+    assertThat(email.getFrom(0).getAddressType()).isEqualTo("EX");
+    assertThat(email.getTo(0).hasNativeAddress()).isFalse();
+    assertThat(email.getTo(0).hasAddressType()).isFalse();
+  }
+
+  @Test
+  @DisplayName("no fact is written to an open-vocabulary map")
+  void nothingIsWrittenToAnOpenVocabularyMap() {
+    assertNoOpenVocabulary(foldFullStream());
   }
 
   // --- origin -------------------------------------------------------------
@@ -395,17 +453,19 @@ class EmailDocumentFoldUnitTest {
     assertThat(document.getOrigin().getMimetype())
         .as("the sniffed container type wins; the caller's claim never overwrites it")
         .isEqualTo("message/rfc822");
-    assertThat(document.getSourceMeta().getExtraMap().get("email.declared_content_type"))
+    assertThat(document.getOrigin().getDeclaredMimetype())
         .as("the caller's claim is kept where it cannot be mistaken for the real type")
         .isEqualTo("application/octet-stream");
+    assertNoOpenVocabulary(document);
   }
 
   @Test
   void aCallerWhoDeclaredNothingGetsNoInventedOrigin() {
     Document document = foldFullStream();
     assertThat(document.getOrigin().getFilename()).isEmpty();
-    assertThat(document.getSourceMeta().getExtraMap())
-        .doesNotContainKey("email.declared_content_type");
+    assertThat(document.getOrigin().hasDeclaredMimetype())
+        .as("an undeclared type is absent, not an empty string")
+        .isFalse();
   }
 
   @Test
@@ -578,9 +638,7 @@ class EmailDocumentFoldUnitTest {
             .setName("X-Spam-Status").setValue("No, score=0.1"))
         .build()));
     Document document = fold.take();
-    assertThat(bodyFields(document).keySet()).allSatisfy(key ->
-        assertThat(key).startsWith("email."));
-    assertThat(bodyFields(document)).doesNotContainKey("email.headers");
+    assertNoOpenVocabulary(document);
     assertThat(document.toString()).doesNotContain("X-Spam-Status");
   }
 
@@ -593,7 +651,7 @@ class EmailDocumentFoldUnitTest {
         .build()));
     Document document = fold.take();
 
-    assertThat(bodyFields(document)).isEmpty();
+    assertNoOpenVocabulary(document);
     assertThat(document.getName()).isEqualTo("bare");
     assertThat(document.getOrigin().getMimetype()).isEqualTo("application/vnd.ms-outlook");
     assertThat(document.getTextsList()).isEmpty();
@@ -625,10 +683,14 @@ class EmailDocumentFoldUnitTest {
     assertThat(base(texts.get(1)).getLabel()).isEqualTo(DocItemLabel.DOC_ITEM_LABEL_TEXT);
     assertThat(base(texts.get(1)).getText()).isEqualTo("First paragraph.");
     assertThat(base(texts.get(2)).getText()).isEqualTo("Second paragraph.");
-    assertThat(base(texts.get(1)).getMeta().getCustomFieldsMap().get("email.part_id")
-        .getStringValue()).isEqualTo("1.1.1");
-    assertThat(base(texts.get(2)).getMeta().getCustomFieldsMap().get("email.part_id")
-        .getStringValue()).isEqualTo("1.1.1");
+    for (BaseTextItem paragraph : texts.subList(1, 3)) {
+      MimePartSource part = mimePart(base(paragraph).getSourceList());
+      assertThat(part.getPartId()).isEqualTo("1.1.1");
+      assertThat(part.getContentType()).isEqualTo("text/plain");
+      assertThat(part.hasContentId())
+          .as("a body part has no Content-ID here, and none is invented")
+          .isFalse();
+    }
   }
 
   @Test
@@ -748,8 +810,10 @@ class EmailDocumentFoldUnitTest {
     assertThat(line.getListItem().getEnumerated()).isFalse();
     assertThat(base(line).getLabel()).isEqualTo(DocItemLabel.DOC_ITEM_LABEL_LIST_ITEM);
     assertThat(base(line).getText()).isEqualTo("order.pdf (application/pdf, 25 bytes)");
-    assertThat(base(line).getMeta().getCustomFieldsMap().get("email.part_id").getStringValue())
-        .isEqualTo("1.2");
+    MimePartSource part = mimePart(base(line).getSourceList());
+    assertThat(part.getPartId()).isEqualTo("1.2");
+    assertThat(part.getContentType()).isEqualTo("application/pdf");
+    assertThat(part.hasContentId()).isFalse();
     assertThat(base(document.getTexts(4)).getText()).isEqualTo("seal.png (image/png, 8 bytes)");
   }
 
@@ -834,10 +898,11 @@ class EmailDocumentFoldUnitTest {
     assertThat(picture.getImage().getUri()).doesNotStartWith("data:");
     assertThat(picture.getImage().getSize().getWidth()).isZero();
     assertThat(picture.getImage().getSize().getHeight()).isZero();
-    assertThat(picture.getMeta().getCustomFieldsMap().get("email.content_id").getStringValue())
-        .isEqualTo("seal@example.gov");
-    assertThat(picture.getMeta().getCustomFieldsMap().get("email.part_id").getStringValue())
-        .isEqualTo("1.3");
+    MimePartSource part = mimePart(picture.getSourceList());
+    assertThat(part.getContentId()).isEqualTo("seal@example.gov");
+    assertThat(part.getPartId()).isEqualTo("1.3");
+    assertThat(part.getContentType()).isEqualTo("image/png");
+    assertThat(picture.getMeta().getCustomFieldsMap()).isEmpty();
   }
 
   @Test
@@ -865,7 +930,9 @@ class EmailDocumentFoldUnitTest {
     Document document = foldFullStream();
     List<SourceType> sources = document.getTextsList().stream()
         .map(item -> base(item).getSourceList())
-        .peek(list -> assertThat(list).hasSize(1))
+        .peek(list -> assertThat(list)
+            .as("the collector first, then at most the part the item came from")
+            .hasSizeBetween(1, 2))
         .map(List::getFirst)
         .toList();
 
@@ -878,8 +945,10 @@ class EmailDocumentFoldUnitTest {
           .as("a declarative mapping is deterministic; a confidence would be noise")
           .isFalse();
     });
-    assertThat(document.getPictures(0).getSourceList()).hasSize(1);
     assertThat(document.getPictures(0).getSource(0).getCollector().getModel()).isEqualTo("eml");
+    assertThat(base(document.getTexts(0)).getSourceList())
+        .as("the title comes from a header, so it has no MIME part to point at")
+        .hasSize(1);
   }
 
   @Test
