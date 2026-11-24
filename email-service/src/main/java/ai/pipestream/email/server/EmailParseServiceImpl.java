@@ -740,7 +740,8 @@ public final class EmailParseServiceImpl extends EmailParseServiceGrpc.EmailPars
       sink.info(HeaderProjection.project(
           HeaderProjection.read(buffer.array(), headerLength),
           options.documentId(),
-          EmailFormat.EMAIL_FORMAT_EML));
+          EmailFormat.EMAIL_FORMAT_EML,
+          sink::warn));
     }
 
     @Override

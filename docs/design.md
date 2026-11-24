@@ -64,7 +64,10 @@ Events, in order:
    an addr-spec; a `.msg` party stored under an Exchange directory name
    also carries it in `native_address` (with `address_type`), and has an
    empty `address` plus a warning when the message holds no SMTP address
-   for it.
+   for it. A header that is present and cannot be read (`Date`, the
+   `Received` date clause, part of an address list) is named in
+   `unparsed_headers` and warned about, so an unset `date` means "absent"
+   only when the header is not listed there.
 2. `BodyPart`: `text/plain` and/or `text/html`, charset already decoded
    to UTF-8 (`charset_detected`, `charset_fallback` and
    `undecodable_sequences` say when the declared charset did not fit the
