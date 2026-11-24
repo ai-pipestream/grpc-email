@@ -27,6 +27,7 @@ import io.grpc.StatusRuntimeException;
 import io.grpc.inprocess.InProcessChannelBuilder;
 import io.grpc.inprocess.InProcessServerBuilder;
 import io.grpc.stub.StreamObserver;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -453,6 +454,27 @@ class EmailParseServiceTest {
     assertThat(result.status().getWarningsList())
         .as("a degraded decode is reported")
         .anyMatch(warning -> warning.contains("charset"));
+  }
+
+  @Test
+  @DisplayName("an 8-bit UTF-8 body with no charset is readable, flagged, and PARTIAL")
+  void undeclaredCharsetIsDetectedFlaggedAndReported() throws Exception {
+    String text = "Grüße aus Köln";
+    java.io.ByteArrayOutputStream message = new java.io.ByteArrayOutputStream();
+    message.writeBytes(("From: cron@example.com\r\nSubject: nightly\r\n"
+        + "Content-Type: text/plain\r\nContent-Transfer-Encoding: 8bit\r\n\r\n")
+        .getBytes(StandardCharsets.US_ASCII));
+    message.writeBytes(text.getBytes(StandardCharsets.UTF_8));
+
+    Result result = parseWhole(message.toByteArray(), "eml-undeclared-charset");
+    BodyPart body = result.bodies().get(0);
+    assertThat(body.getText()).isEqualTo(text);
+    assertThat(body.getCharset()).isEmpty();
+    assertThat(body.getCharsetDetected()).isEqualTo("utf-8");
+    assertThat(body.getCharsetFallback()).isTrue();
+    assertThat(result.status().getState()).isEqualTo(ParseStatus.State.STATE_PARTIAL);
+    assertThat(result.status().getWarningsList())
+        .anyMatch(warning -> warning.contains("no charset"));
   }
 
   // --- damaged transfer encodings: one bad part never fails the message ----

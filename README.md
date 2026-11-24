@@ -63,7 +63,7 @@ Document projection below).
 | Event | When | Carries |
 |---|---|---|
 | `EmailInfo` | first, from headers alone | format, subject, role-tagged addresses, dates, message-id, in-reply-to (scalar plus every id), references, MAPI conversation topic and index for `.msg`, root content type, the full header list |
-| `BodyPart` | per text part, in MIME order | `part_id`, `PLAIN`/`HTML` + `content_type_raw`, UTF-8 text, declared charset, MAPI source property for `.msg` |
+| `BodyPart` | per text part, in MIME order | `part_id`, `PLAIN`/`HTML` + `content_type_raw`, UTF-8 text, declared charset, the charset actually used and whether it was a fallback, MAPI source property for `.msg` |
 | `Attachment` | per attachment, unless `omit_attachment_list` | index, filename, content type, size, content id, inline flag, optional bytes |
 | `Document` | once, immediately before the trailer, only when `emit_document` | the whole message as one `ai.pipestream.document.v1.Document` |
 | `ParseStatus` | last, exactly once | `STATE_OK` / `STATE_PARTIAL`, warnings (the first 100, then a count of the rest), counts, message size |
@@ -145,9 +145,16 @@ an invented page number.
   JVM-wide System properties (which it reads instead of the `Session`). One
   damaged part never fails the message: a base64 or uuencoded part cut short
   keeps every byte that decoded, a part with an unknown
-  `Content-Transfer-Encoding` keeps its bytes undecoded, and a part whose
-  declared charset does not exist is read as ISO-8859-1, each with a
-  `STATE_PARTIAL` warning naming what was repaired. Encoded words decode even
+  `Content-Transfer-Encoding` keeps its bytes undecoded, each with a
+  `STATE_PARTIAL` warning naming what was repaired. Body text is decoded
+  strictly from the part's own bytes, not by Jakarta Mail's replacing
+  reader: when the bytes are not valid in the declared charset, the charset
+  is unknown, or none is declared and the bytes are not US-ASCII, the body is
+  read as UTF-8 when it is valid UTF-8, kept in its charset with each damaged
+  sequence replaced by U+FFFD when it is mostly valid there, and otherwise
+  read as windows-1252 or ISO-8859-1. `BodyPart.charset_detected`,
+  `charset_fallback` and `undecodable_sequences` say which, with a
+  `STATE_PARTIAL` warning naming the part. Encoded words decode even
   when a mailer glued them to the surrounding text, an unquoted filename with
   spaces survives the strict parameter grammar, and a multipart that carries
   no parts keeps its text as a plain body. Multipart nesting is walked at most

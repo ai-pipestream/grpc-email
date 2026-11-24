@@ -12,13 +12,9 @@ import jakarta.mail.internet.MimeMessage;
 import jakarta.mail.internet.MimeMultipart;
 import jakarta.mail.internet.MimePart;
 import jakarta.mail.internet.MimePartDataSource;
-import jakarta.mail.internet.MimeUtility;
 import jakarta.mail.util.SharedByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.ByteBuffer;
-import java.nio.charset.CharacterCodingException;
-import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.Properties;
 
@@ -240,26 +236,20 @@ public final class EmlParser {
     }
     sink.warn("multipart at part " + path
         + " carries no parts; the text before its first boundary was read as a plain body");
-    Decoded decoded = utf8OrLatin1(preamble.getBytes(StandardCharsets.ISO_8859_1));
+    // The preamble sits outside every part, so no charset was declared for it.
+    BodyText.Decoded decoded =
+        BodyText.decode(preamble.getBytes(StandardCharsets.ISO_8859_1), "", path, sink);
     sink.bodyPart(
         BodyPart.newBuilder()
             .setPartId(path)
             .setMediaType(BodyMediaType.BODY_MEDIA_TYPE_PLAIN)
             .setContentTypeRaw(HeaderProjection.baseType(header(part, "Content-Type", "")))
             .setText(decoded.text().strip())
-            .setCharset(decoded.charset())
+            .setCharsetDetected(decoded.charsetDetected())
+            .setCharsetFallback(decoded.fallback())
+            .setUndecodableSequences(decoded.undecodableSequences())
             .build());
     state.bodyEmitted = true;
-  }
-
-  /** Bytes with no declared charset: UTF-8 when they are valid UTF-8, else ISO-8859-1. */
-  private static Decoded utf8OrLatin1(byte[] bytes) {
-    try {
-      return new Decoded(
-          StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString(), "utf-8");
-    } catch (CharacterCodingException notUtf8) {
-      return new Decoded(new String(bytes, StandardCharsets.ISO_8859_1), "iso-8859-1");
-    }
   }
 
   private static void emitLeaf(
@@ -286,7 +276,7 @@ public final class EmlParser {
   private static void emitBody(
       Part part, String path, String baseType, String contentType, ParseSink sink) {
     String charset = parameter(contentType, "charset");
-    Decoded decoded = text(part, charset, path, sink);
+    BodyText.Decoded decoded = BodyText.decode(bodyBytes(part, path, sink), charset, path, sink);
     sink.bodyPart(
         BodyPart.newBuilder()
             .setPartId(path)
@@ -295,7 +285,10 @@ public final class EmlParser {
                 : BodyMediaType.BODY_MEDIA_TYPE_PLAIN)
             .setContentTypeRaw(baseType)
             .setText(decoded.text())
-            .setCharset(decoded.charset())
+            .setCharset(charset)
+            .setCharsetDetected(decoded.charsetDetected())
+            .setCharsetFallback(decoded.fallback())
+            .setUndecodableSequences(decoded.undecodableSequences())
             .build());
   }
 
@@ -338,64 +331,27 @@ public final class EmlParser {
     sink.attachment(attachment.build());
   }
 
-  /** A decoded body part plus the charset actually used to decode it. */
-  private record Decoded(String text, String charset) {}
-
-  private static Decoded text(Part part, String declaredCharset, String path, ParseSink sink) {
-    try {
-      Object content = part.getContent();
-      if (content instanceof String string) {
-        return new Decoded(string, declaredCharset);
-      }
-      if (content instanceof InputStream stream) {
-        try (InputStream open = stream) {
-          return new Decoded(new String(open.readAllBytes(), StandardCharsets.UTF_8),
-              declaredCharset);
-        }
-      }
-      return new Decoded(String.valueOf(content), declaredCharset);
-    } catch (IOException | MessagingException | RuntimeException undecodable) {
-      return recoverText(part, declaredCharset, path, sink);
-    }
-  }
-
   /**
-   * The text of a body part Jakarta Mail would not decode. Either the
-   * transfer encoding is damaged (a base64 body cut short, an encoding
-   * nobody knows) or the charset is unknown or lying; the two are told apart
-   * here, each is repaired on its own, and the warning names the one that
-   * actually failed. An unknown charset falls back to ISO-8859-1, which maps
-   * every byte to a code point, so the content survives round-tripping.
+   * A body part's bytes with its transfer encoding undone, and nothing else:
+   * the charset is {@link BodyText}'s business, so Jakarta Mail's text
+   * handler (which decodes through a replacing reader and never reports) is
+   * not asked. A damaged transfer encoding (a base64 body cut short, an
+   * encoding nobody knows) keeps the bytes that did decode and warns.
    */
-  private static Decoded recoverText(
-      Part part, String declaredCharset, String path, ParseSink sink) {
-    TransferDecoding.Recovered recovered;
-    try {
-      recovered = TransferDecoding.recover(part);
-    } catch (IOException | MessagingException unreadable) {
-      throw new InvalidEmailException(
-          "unreadable body at part " + path + ": " + unreadable.getMessage(), unreadable);
-    }
-    recovered.damage().ifPresent(damage ->
-        sink.warn("part " + path + " has a " + damage + "; the text that decoded was kept"));
-    Charset charset = charset(declaredCharset);
-    if (charset == null) {
-      sink.warn("part " + path + " declared charset '" + declaredCharset
-          + "' which could not be decoded; read as ISO-8859-1");
-      return new Decoded(new String(recovered.bytes(), StandardCharsets.ISO_8859_1), "iso-8859-1");
-    }
-    return new Decoded(new String(recovered.bytes(), charset), declaredCharset);
-  }
-
-  /**
-   * The charset a body declared, or US-ASCII when it declared none (RFC
-   * 2045's default, and Jakarta Mail's). Null when this JVM cannot decode it.
-   */
-  private static Charset charset(String declared) {
-    try {
-      return Charset.forName(declared.isEmpty() ? "us-ascii" : MimeUtility.javaCharset(declared));
-    } catch (IllegalArgumentException unknown) {
-      return null;
+  private static byte[] bodyBytes(Part part, String path, ParseSink sink) {
+    try (InputStream stream = part.getInputStream()) {
+      return stream.readAllBytes();
+    } catch (IOException | MessagingException | RuntimeException refused) {
+      TransferDecoding.Recovered recovered;
+      try {
+        recovered = TransferDecoding.recover(part);
+      } catch (IOException | MessagingException unreadable) {
+        throw new InvalidEmailException(
+            "unreadable body at part " + path + ": " + unreadable.getMessage(), unreadable);
+      }
+      recovered.damage().ifPresent(damage ->
+          sink.warn("part " + path + " has a " + damage + "; the text that decoded was kept"));
+      return recovered.bytes();
     }
   }
 
