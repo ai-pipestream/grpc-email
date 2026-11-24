@@ -66,7 +66,7 @@ Document projection below).
 | `BodyPart` | per text part, in MIME order | `part_id`, `PLAIN`/`HTML` + `content_type_raw`, UTF-8 text, declared charset, the charset actually used and whether it was a fallback, MAPI source property for `.msg` |
 | `Attachment` | per attachment, unless `omit_attachment_list` | index, filename, content type, size, content id, inline flag, optional bytes |
 | `Document` | once, immediately before the trailer, only when `emit_document` | the whole message as one `ai.pipestream.document.v1.Document` |
-| `ParseStatus` | last, exactly once | `STATE_OK` / `STATE_PARTIAL`, warnings (the first 100, then a count of the rest), counts, message size |
+| `ParseStatus` | last, exactly once | `STATE_OK` / `STATE_PARTIAL`, warnings (the first 100, then a count of the rest), counts, message size, `encrypted` |
 
 Format is detected from the bytes (OLE2 signature, or an RFC 822 header block
 that carries at least one real mail field). The advisory content type is never
@@ -165,7 +165,12 @@ an invented page number.
   32 levels deep and over at most eight times the message's size in
   multipart bytes (Jakarta Mail rescans each level to find its boundaries);
   a subtree past either bound is emitted whole, as one opaque attachment,
-  with a warning.
+  with a warning. A message that yields no `text/plain` or `text/html` body
+  says so in a warning. When its root is an encryption envelope (S/MIME
+  `application/pkcs7-mime` other than signed, compressed or certs-only, or
+  `multipart/encrypted`), `ParseStatus.encrypted` is set, the warning says
+  the content was not read, and the sealed payload is listed as an
+  attachment; nothing here decrypts.
 - **TNEF (`winmail.dat`, `application/ms-tnef`)**, in either format: an
   attachment whose bytes carry the TNEF signature is unpacked, whatever it
   was labelled. The attachments inside it take its place, named under the
@@ -207,7 +212,10 @@ an invented page number.
   Outlook stores an embedded message as a nested storage directory rather
   than a byte stream, so that directory is repacked into a standalone `.msg`
   and emitted as the attachment's payload: the nested message is deferred to
-  the coordinator, not destroyed.
+  the coordinator, not destroyed. An attachment with neither a data stream
+  nor an embedded storage (a file attached by reference) is listed with
+  size 0 and a warning. `PidTagConversationIndex` rides as
+  `EmailInfo.conversation_index_raw`, the bytes the store kept.
 
 Out of scope for v1: sending mail, IMAP/POP, PST/OST, S/MIME decryption, DKIM
 verification, expanding embedded `message/rfc822` and Outlook attachments in

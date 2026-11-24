@@ -29,7 +29,6 @@ import ai.pipestream.email.v1.EmailFormat;
 import ai.pipestream.email.v1.EmailInfo;
 import ai.pipestream.email.v1.Header;
 import ai.pipestream.email.v1.ParseEmailResponse;
-import com.google.protobuf.ByteString;
 import com.google.protobuf.ListValue;
 import com.google.protobuf.Struct;
 import com.google.protobuf.Timestamp;
@@ -39,7 +38,6 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -384,9 +382,9 @@ public final class EmailDocumentFold {
     if (!info.getConversationTopic().isEmpty()) {
       email.setConversationTopic(info.getConversationTopic());
     }
-    ByteString conversationIndex = decode(info.getConversationIndex());
-    if (!conversationIndex.isEmpty()) {
-      email.setConversationIndex(conversationIndex);
+    // Bytes in, bytes out: the index is never text on the way.
+    if (!info.getConversationIndexRaw().isEmpty()) {
+      email.setConversationIndex(info.getConversationIndexRaw());
     }
     if (info.hasDate()) {
       email.setSent(info.getDate());
@@ -408,44 +406,6 @@ public final class EmailDocumentFold {
       party.setName(address.getName());
     }
     return party.build();
-  }
-
-  /**
-   * The message's conversation index as the bytes it is.
-   *
-   * <p>{@code EmailInfo.conversation_index} carries the MAPI property's
-   * lowercase hex, and the RFC 822 spelling of the same structure
-   * (Thread-Index) is base64, so both are accepted and neither is written
-   * into the Document as text: the field is {@code bytes} because a prefix
-   * comparison over the raw structure is what orders a thread, and a hex
-   * string compares by the wrong thing. A value that is neither spelling is
-   * dropped rather than turned into bytes it never meant.
-   */
-  private static ByteString decode(String value) {
-    if (value.isEmpty()) {
-      return ByteString.EMPTY;
-    }
-    if (value.length() % 2 == 0 && value.chars().allMatch(EmailDocumentFold::isHexDigit)) {
-      byte[] bytes = new byte[value.length() / 2];
-      for (int index = 0; index < bytes.length; index++) {
-        bytes[index] = (byte) ((digit(value.charAt(index * 2)) << 4)
-            | digit(value.charAt(index * 2 + 1)));
-      }
-      return ByteString.copyFrom(bytes);
-    }
-    try {
-      return ByteString.copyFrom(Base64.getDecoder().decode(value));
-    } catch (IllegalArgumentException notBase64) {
-      return ByteString.EMPTY;
-    }
-  }
-
-  private static boolean isHexDigit(int character) {
-    return Character.digit(character, 16) >= 0;
-  }
-
-  private static int digit(char character) {
-    return Character.digit(character, 16);
   }
 
   /**

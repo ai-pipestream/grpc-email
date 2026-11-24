@@ -6,6 +6,7 @@ import ai.pipestream.email.v1.BodyMediaType;
 import ai.pipestream.email.v1.BodyPart;
 import ai.pipestream.email.v1.EmailFormat;
 import ai.pipestream.email.v1.EmailInfo;
+import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
 import jakarta.mail.internet.InternetHeaders;
 import java.io.ByteArrayInputStream;
@@ -150,7 +151,8 @@ public final class MsgParser {
     // A message filed out of a mailbox usually has no transport headers at
     // all, and without these it would have no threading whatsoever.
     info.setConversationTopic(text(chunks.getConversationTopic()));
-    info.setConversationIndex(hex(binary(chunks, MAPIProperty.CONVERSATION_INDEX)));
+    info.setConversationIndexRaw(
+        ByteString.copyFrom(binary(chunks, MAPIProperty.CONVERSATION_INDEX)));
 
     // Transport headers are the only place a .msg keeps genuine RFC 822
     // headers. MAPI properties are not dressed up as headers here: an
@@ -179,20 +181,6 @@ public final class MsgParser {
       }
     }
     return new byte[0];
-  }
-
-  /**
-   * Lowercase hex of a binary property. PidTagConversationIndex is a packed
-   * structure, not text, and its prefix ordering is what makes it useful, so
-   * it is carried verbatim rather than decoded into fields this service has
-   * no slot for.
-   */
-  private static String hex(byte[] value) {
-    StringBuilder hex = new StringBuilder(value.length * 2);
-    for (byte b : value) {
-      hex.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
-    }
-    return hex.toString();
   }
 
   private static void applyTransportHeaders(
@@ -382,6 +370,12 @@ public final class MsgParser {
     }
     DirectoryChunk directory = chunk.getAttachmentDirectory();
     if (directory == null || directory.getDirectory() == null) {
+      // Neither storage form is there: a file attached by reference, or a
+      // data stream that was lost. The attachment is still listed, and the
+      // size 0 beside its name must not read as "an empty file".
+      sink.warn("attachment " + index + " carries no data in the message (neither"
+          + " PidTagAttachDataBinary nor an embedded storage; it may be attached by reference);"
+          + " listed without its bytes");
       return new byte[0];
     }
     try (POIFSFileSystem nested = new POIFSFileSystem();

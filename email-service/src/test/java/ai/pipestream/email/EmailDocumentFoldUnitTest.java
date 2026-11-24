@@ -33,6 +33,7 @@ import ai.pipestream.email.v1.EmailInfo;
 import ai.pipestream.email.v1.Header;
 import ai.pipestream.email.v1.ParseEmailResponse;
 import ai.pipestream.email.v1.ParseStatus;
+import com.google.protobuf.ByteString;
 import com.google.protobuf.Struct;
 import com.google.protobuf.Timestamp;
 import com.google.protobuf.Value;
@@ -516,7 +517,9 @@ class EmailDocumentFoldUnitTest {
         .setFormat(EmailFormat.EMAIL_FORMAT_MSG)
         .setSubject("RE: Docket 24-1183")
         .setConversationTopic("Docket 24-1183")
-        .setConversationIndex("01d9f7a2b3c4d5e6f70809")
+        .setConversationIndexRaw(ByteString.copyFrom(new byte[] {
+            0x01, (byte) 0xd9, (byte) 0xf7, (byte) 0xa2, (byte) 0xb3, (byte) 0xc4, (byte) 0xd5,
+            (byte) 0xe6, (byte) 0xf7, 0x08, 0x09}))
         .build()));
     EmailMeta email = fold.take().getEmail();
 
@@ -533,17 +536,20 @@ class EmailDocumentFoldUnitTest {
   }
 
   @Test
-  @DisplayName("a Thread-Index spelled in base64 decodes to the same kind of bytes")
-  void aBase64ConversationIndexIsAlsoRead() {
+  @DisplayName("text in the retired hex field is not guessed back into bytes")
+  @SuppressWarnings("deprecation")
+  void theRetiredHexFieldIsNotRead() {
     EmailDocumentFold fold = new EmailDocumentFold(VERSION);
     fold.consume(event(EmailInfo.newBuilder()
-        .setDocumentId("threaded")
+        .setDocumentId("old-shape")
         .setFormat(EmailFormat.EMAIL_FORMAT_MSG)
-        .setConversationIndex("Adn3orPE1eb3CAk=")
+        .setSubject("RE: Docket 24-1183")
+        .setConversationIndex("01d9f7a2b3c4d5e6f70809")
         .build()));
 
-    assertThat(fold.take().getEmail().getConversationIndex().toByteArray())
-        .containsExactly(0x01, 0xd9, 0xf7, 0xa2, 0xb3, 0xc4, 0xd5, 0xe6, 0xf7, 0x08, 0x09);
+    assertThat(fold.take().getEmail().hasConversationIndex())
+        .as("the fold copies bytes; it no longer decides whether text is hex or base64")
+        .isFalse();
   }
 
   @Test
