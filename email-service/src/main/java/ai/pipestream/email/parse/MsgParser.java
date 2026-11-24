@@ -284,9 +284,9 @@ public final class MsgParser {
       sink.warn("message carries no plain, HTML, or RTF body");
       return false;
     }
-    String extracted;
+    RtfPlainText.Extracted extracted;
     try {
-      extracted = RtfPlainText.extract(rtf);
+      extracted = RtfPlainText.read(rtf);
     } catch (RuntimeException malformed) {
       // A damaged RTF body costs the body, not the envelope and the
       // attachments around it.
@@ -294,17 +294,17 @@ public final class MsgParser {
       return false;
     }
     sink.warn("RTF-only body: plain text extracted without layout, tables, or formatting");
-    if (extracted.isEmpty()) {
+    if (extracted.text().isEmpty()) {
       return false;
     }
-    sink.bodyPart(
-        BodyPart.newBuilder()
-            .setPartId("body:rtf")
-            .setMediaType(BodyMediaType.BODY_MEDIA_TYPE_PLAIN)
-            .setContentTypeRaw("text/plain")
-            .setText(extracted)
-            .setSourceProperty("PidTagRtfCompressed")
-            .build());
+    BodyPart.Builder body = BodyPart.newBuilder()
+        .setPartId("body:rtf")
+        .setMediaType(BodyMediaType.BODY_MEDIA_TYPE_PLAIN)
+        .setContentTypeRaw("text/plain")
+        .setText(extracted.text())
+        .setSourceProperty("PidTagRtfCompressed");
+    RtfPlainText.describe(extracted, body, "RTF body", sink);
+    sink.bodyPart(body.build());
     return true;
   }
 

@@ -288,13 +288,17 @@ message BodyPart {
   // transfer-decoded bytes are decoded strictly: when they are not valid in
   // the declared charset, or the part declared none and is not plain
   // US-ASCII, the service picks UTF-8 when the bytes are valid UTF-8, then
-  // windows-1252, then ISO-8859-1 (which maps every byte). Empty for a .msg
-  // or TNEF body, which does not arrive as charset-declared bytes.
+  // windows-1252, then ISO-8859-1 (which maps every byte). For a body taken
+  // from RTF (source_property "PidTagRtfCompressed"), the charset of the
+  // RTF's code page, in which its \'hh bytes were decoded; charset is then
+  // that same charset, or "cpN" for a code page this service cannot decode.
+  // Empty for any other .msg or TNEF body, which arrives as text.
   string charset_detected = 7;
   // True when charset_detected is not the charset the part declared: the
   // declared one was wrong for the bytes, unknown to this service, or
-  // missing while the bytes were not US-ASCII. ParseStatus carries a warning
-  // naming the part.
+  // missing while the bytes were not US-ASCII; or, for a body taken from
+  // RTF, bytes arrived in a code page this service cannot decode and were
+  // kept as ISO-8859-1. ParseStatus carries a warning naming the part.
   bool charset_fallback = 8;
   // Byte sequences that were not valid in charset_detected and were each
   // replaced by U+FFFD in text: a body that is mostly valid in its charset

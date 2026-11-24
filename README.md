@@ -179,7 +179,12 @@ an invented page number.
   `PidTagRecipientType` (1 to / 2 cc / 3 bcc). Bodies come from `PidTagBody`
   and `PidTagHtml`; HTML wins over RTF, and an RTF-only message gets
   best-effort plain text with a `STATE_PARTIAL` warning, since v1 ships no
-  RTF layout engine. Transport headers are surfaced when the message kept
+  RTF layout engine. The RTF's `\'hh` bytes are decoded in their code
+  page (the document's `\ansicpg`, 1252 by default, or the one the font in
+  force names with `\fcharset` or `\cpg`), double-byte code pages
+  included; `BodyPart.charset_detected` names it, and a code page this
+  service cannot decode keeps its bytes as ISO-8859-1 with
+  `charset_fallback` set and a warning. Transport headers are surfaced when the message kept
   them; MAPI properties are never dressed up as headers they are not.
   Outlook stores an embedded message as a nested storage directory rather
   than a byte stream, so that directory is repacked into a standalone `.msg`
