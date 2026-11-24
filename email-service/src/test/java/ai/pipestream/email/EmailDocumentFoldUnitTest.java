@@ -639,6 +639,83 @@ class EmailDocumentFoldUnitTest {
   }
 
   @Test
+  @DisplayName("an HTML body is not parsed here, but the Document names it")
+  void anHtmlOnlyMessageRegistersItsBodyAsASubDocument() {
+    String markup = "<html><body><h1>Gr\u00fc\u00dfe</h1></body></html>";
+    EmailDocumentFold fold = new EmailDocumentFold(VERSION);
+    fold.consume(event(envelope()));
+    fold.consume(event(html("1.2", markup)));
+    fold.consume(status());
+    Document document = fold.take();
+
+    assertThat(document.getAttachmentsCount())
+        .as("a Document-plane client can tell a body was left for another parser")
+        .isEqualTo(1);
+    SubDocumentRef body = document.getAttachments(0);
+    assertThat(body.getId())
+        .as("the pointer resolves to the BodyPart event with that part id")
+        .isEqualTo("part:1.2");
+    assertThat(body.getMediaType()).isEqualTo("text/html");
+    assertThat(body.getKind()).isEqualTo("body");
+    assertThat(body.getSizeBytes())
+        .as("the size of the text as the stream carries it, in UTF-8 bytes")
+        .isEqualTo(markup.getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
+    assertThat(body.getName()).as("a body has no filename, and none is invented").isEmpty();
+    assertThat(body.hasItemRef()).as("no item mentions it").isFalse();
+    assertThat(document.getGroupsList())
+        .as("a body is not an attachment: it opens no attachments list")
+        .isEmpty();
+    assertThat(EmailDocumentFold.integrityErrors(document)).isEmpty();
+  }
+
+  @Test
+  void everyHtmlBodyIsRegistered_alsoBesideAPlainOne() {
+    EmailDocumentFold fold = new EmailDocumentFold(VERSION);
+    fold.consume(event(envelope()));
+    fold.consume(event(plain("1.1", "Plain alternative.")));
+    fold.consume(event(html("1.2", "<p>Rich alternative.</p>")));
+    fold.consume(event(html("2", "<p>A second HTML part.</p>")));
+    Document document = fold.take();
+
+    assertThat(document.getAttachmentsList())
+        .extracting(SubDocumentRef::getId, SubDocumentRef::getKind)
+        .containsExactly(tuple("part:1.2", "body"), tuple("part:2", "body"));
+  }
+
+  @Test
+  void anHtmlBodyKeepsTheBaseTypeItDeclared_withoutParameters() {
+    EmailDocumentFold fold = new EmailDocumentFold(VERSION);
+    fold.consume(event(html("1", "<p>x</p>").toBuilder()
+        .setContentTypeRaw("Text/HTML; charset=\"utf-8\"").build()));
+
+    assertThat(fold.take().getAttachments(0).getMediaType()).isEqualTo("text/html");
+  }
+
+  @Test
+  void aPlainBodyIsMapped_soItIsNotRegistered() {
+    EmailDocumentFold fold = new EmailDocumentFold(VERSION);
+    fold.consume(event(plain("1", "Body.")));
+
+    assertThat(fold.take().getAttachmentsList()).isEmpty();
+  }
+
+  @Test
+  void aBodyOfAMediaTypeThisFoldDoesNotKnow_isRegisteredRatherThanDropped() {
+    EmailDocumentFold fold = new EmailDocumentFold(VERSION);
+    fold.consume(event(BodyPart.newBuilder()
+        .setPartId("1")
+        .setContentTypeRaw("text/enriched")
+        .setText("<bold>x</bold>")
+        .build()));
+    Document document = fold.take();
+
+    assertThat(document.getTextsList()).isEmpty();
+    assertThat(document.getAttachmentsList())
+        .extracting(SubDocumentRef::getId, SubDocumentRef::getMediaType, SubDocumentRef::getKind)
+        .containsExactly(tuple("part:1", "text/enriched", "body"));
+  }
+
+  @Test
   void paragraphSplittingIsDeterministicAcrossLineEndingsAndBlankRuns() {
     EmailDocumentFold fold = new EmailDocumentFold(VERSION);
     fold.consume(event(plain("1", "  One.  \r\n\r\n\r\nTwo.\n \nThree.\n\n")));
@@ -675,8 +752,11 @@ class EmailDocumentFoldUnitTest {
   void attachmentsBecomeTypedSubDocumentRefs() {
     Document document = foldFullStream();
 
-    assertThat(document.getAttachmentsCount()).isEqualTo(2);
-    SubDocumentRef order = document.getAttachments(0);
+    assertThat(document.getAttachmentsList())
+        .extracting(SubDocumentRef::getId)
+        .as("the unmapped HTML body first, then the attachments, in stream order")
+        .containsExactly("part:1.1.2", "part:1.2", "part:1.3");
+    SubDocumentRef order = document.getAttachments(1);
     assertThat(order.getId()).isEqualTo("part:1.2");
     assertThat(order.getName()).isEqualTo("order.pdf");
     assertThat(order.getMediaType()).isEqualTo("application/pdf");
@@ -687,7 +767,9 @@ class EmailDocumentFoldUnitTest {
     assertThat(base(document.getTexts(3)).getText())
         .isEqualTo("order.pdf (application/pdf, 25 bytes)");
 
-    SubDocumentRef seal = document.getAttachments(1);
+    assertThat(order.hasKind()).as("an attachment is not marked as a body").isFalse();
+
+    SubDocumentRef seal = document.getAttachments(2);
     assertThat(seal.getId()).isEqualTo("part:1.3");
     assertThat(seal.getItemRef()).isEqualTo("#/texts/4");
     assertThat(seal.getId())

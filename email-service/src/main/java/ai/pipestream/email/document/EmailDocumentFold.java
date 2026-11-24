@@ -34,6 +34,7 @@ import com.google.protobuf.ListValue;
 import com.google.protobuf.Struct;
 import com.google.protobuf.Timestamp;
 import com.google.protobuf.Value;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
@@ -43,6 +44,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -81,8 +83,11 @@ import java.util.TreeMap;
  *       child.
  *   <li>Each {@code text/plain} body part becomes one {@link TextItem} per
  *       blank-line-separated paragraph.
- *   <li>HTML body parts are not parsed and not mapped. Parsing HTML is the
- *       HTML collector's job; its items merge into this fragment downstream.
+ *   <li>HTML body parts are not parsed and produce no items. Parsing HTML is
+ *       the HTML collector's job; its items merge into this fragment
+ *       downstream. Each one is registered as a {@link SubDocumentRef} of
+ *       kind "body" in {@code Document.attachments}, so the Document names
+ *       the body it did not parse.
  *   <li>Attachment events -- emitted unless the client opted out of the
  *       listing -- become a {@link GroupLabel#GROUP_LABEL_LIST} group named
  *       "attachments" for readers, and one {@link SubDocumentRef} in
@@ -126,6 +131,15 @@ public final class EmailDocumentFold {
 
   /** Media type of the .msg container, for {@link DocumentOrigin}. */
   public static final String MSG_MIMETYPE = "application/vnd.ms-outlook";
+
+  /** Media type of an HTML body whose part declared none. */
+  private static final String HTML_MIMETYPE = "text/html";
+
+  /**
+   * {@link SubDocumentRef#getKind()} of a message body registered because
+   * this fold does not parse it, as against an attachment, which has none.
+   */
+  public static final String BODY_KIND = "body";
 
   private static final String BODY_REF = "#/body";
   private static final String FURNITURE_REF = "#/furniture";
@@ -578,17 +592,54 @@ public final class EmailDocumentFold {
   // --- bodies -------------------------------------------------------------
 
   /**
-   * Maps a plain-text body part to one text item per paragraph. HTML parts
-   * are skipped whole: this collector hands HTML to the HTML collector
+   * Maps a plain-text body part to one text item per paragraph. An HTML part
+   * produces no items: this collector hands HTML to the HTML collector
    * verbatim on the typed stream and refuses to guess at its structure here.
+   * It is registered instead, so the Document says a body exists that it did
+   * not parse; see {@link #registerBody}.
    */
   private void bodyPart(BodyPart part) {
     if (part.getMediaType() != BodyMediaType.BODY_MEDIA_TYPE_PLAIN) {
+      registerBody(part);
       return;
     }
     for (String paragraph : paragraphs(part.getText())) {
       addText(BODY_REF, paragraph, Map.of(KEY_PART_ID, string(part.getPartId())));
     }
+  }
+
+  /**
+   * Registers a body this fold does not map as a nested payload a downstream
+   * parser can be pointed at.
+   *
+   * <p>Without it an HTML-only message, which is most marketing mail and a
+   * good deal of what mail clients write, folds into a title and an
+   * attachment list, and nothing in the Document says a body was left out.
+   * The entry is a {@link SubDocumentRef} in the same registry and with the
+   * same {@code part:<part_id>} pointer as an attachment; the pointer
+   * resolves to the BodyPart event with that part id on the typed stream.
+   * {@code kind} is "body" so a reader can tell it from an attachment, the
+   * size is that of the text as the stream carries it (UTF-8), and it has no
+   * name and no item ref because the message gave it neither.
+   */
+  private void registerBody(BodyPart part) {
+    String declared = baseType(part.getContentTypeRaw());
+    String mediaType = declared.isEmpty()
+            && part.getMediaType() == BodyMediaType.BODY_MEDIA_TYPE_HTML
+        ? HTML_MIMETYPE
+        : declared;
+    document.addAttachments(SubDocumentRef.newBuilder()
+        .setId(PART_URI_SCHEME + part.getPartId())
+        .setMediaType(mediaType)
+        .setSizeBytes(part.getText().getBytes(StandardCharsets.UTF_8).length)
+        .setKind(BODY_KIND));
+  }
+
+  /** A content type as its lowercase "type/subtype", parameters dropped. */
+  private static String baseType(String contentType) {
+    int parameters = contentType.indexOf(';');
+    String base = parameters < 0 ? contentType : contentType.substring(0, parameters);
+    return base.strip().toLowerCase(Locale.ROOT);
   }
 
   /**
